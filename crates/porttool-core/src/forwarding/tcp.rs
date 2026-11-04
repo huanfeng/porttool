@@ -90,13 +90,18 @@ impl Forwarder for TcpForwarder {
             loop {
                 match listener.accept().await {
                     Ok((client, client_addr)) => {
-                        // 检查连接数限制（先读后判断，避免竞态条件）
-                        let current = {
-                            let s = state.read().await;
-                            s.active_connections
+                        // 原子地检查并增加计数（使用单个 write 锁）
+                        let should_accept = {
+                            let mut s = state.write().await;
+                            if s.active_connections >= max_conns {
+                                false
+                            } else {
+                                s.active_connections += 1;
+                                true
+                            }
                         };
 
-                        if current >= max_conns {
+                        if !should_accept {
                             tracing::warn!(
                                 "[{}] 达到最大连接数 {}, 拒绝新连接: {}",
                                 name, max_conns, client_addr
@@ -105,26 +110,38 @@ impl Forwarder for TcpForwarder {
                             continue;
                         }
 
-                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current + 1, max_conns);
-
-                        // 先增加计数（在 spawn 之前，防止竞态）
-                        {
-                            let mut s = state.write().await;
-                            s.active_connections += 1;
-                        }
+                        let current = {
+                            let s = state.read().await;
+                            s.active_connections
+                        };
+                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current, max_conns);
 
                         // 为每个连接启动独立的转发任务
                         let target = target_addr;
                         let state_clone = state.clone();
                         let name_clone = name.clone();
                         tokio::spawn(async move {
+                            // 使用 RAII guard 确保计数器始终递减（包括 panic）
+                            struct ConnectionGuard {
+                                state: Arc<RwLock<ForwarderState>>,
+                            }
+
+                            impl Drop for ConnectionGuard {
+                                fn drop(&mut self) {
+                                    let state = self.state.clone();
+                                    tokio::spawn(async move {
+                                        let mut s = state.write().await;
+                                        s.active_connections = s.active_connections.saturating_sub(1);
+                                    });
+                                }
+                            }
+
+                            let _guard = ConnectionGuard { state: state_clone };
+
                             if let Err(e) = handle_connection(client, target, &name_clone).await {
                                 tracing::debug!("[{}] 连接处理失败: {}", name_clone, e);
                             }
-
-                            // 减少活动连接计数
-                            let mut s = state_clone.write().await;
-                            s.active_connections = s.active_connections.saturating_sub(1);
+                            // _guard 在此 drop，确保计数器递减
                         });
                     }
                     Err(e) => {
