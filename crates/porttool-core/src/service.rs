@@ -45,9 +45,19 @@ impl Service {
         let mut forwarders = self.forwarders.write().await;
 
         // 停止不在新配置中的规则
-        forwarders.retain(|name, _| {
-            config.rules.iter().any(|r| r.name() == name)
-        });
+        let to_stop: Vec<String> = forwarders
+            .keys()
+            .filter(|name| !config.rules.iter().any(|r| r.name() == *name))
+            .cloned()
+            .collect();
+
+        for name in to_stop {
+            if let Some(fwd) = forwarders.remove(&name) {
+                if let Err(e) = fwd.stop().await {
+                    tracing::warn!("停止规则 {} 失败: {}", name, e);
+                }
+            }
+        }
 
         // 创建新规则的转发器
         for rule in &config.rules {
@@ -66,7 +76,17 @@ impl Service {
                 ForwardRule::Tcp(r) => Box::new(TcpForwarder::new(r.clone())),
             };
 
-            forwarders.insert(name, forwarder);
+            // 启动转发器
+            match forwarder.start().await {
+                Ok(()) => {
+                    tracing::info!("规则 {} 已启动", name);
+                    forwarders.insert(name, forwarder);
+                }
+                Err(e) => {
+                    tracing::error!("规则 {} 启动失败: {}", name, e);
+                    // 继续处理其他规则
+                }
+            }
         }
 
         Ok(())
@@ -138,18 +158,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
+        // 先绑定一个随机端口
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+
         let mut config = Config::default();
         config.rules.push(ForwardRule::Tcp(TcpRule {
             name: "test".into(),
-            listen: "127.0.0.1:8080".into(),
+            listen: listen_addr.to_string(),
             target: "127.0.0.1:9090".into(),
             enabled: true,
         }));
 
         let service = Service::start(config, path).await.unwrap();
+
+        // 等待规则启动
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         let rules = service.list_rules().await;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "test");
+        assert_eq!(rules[0].state, crate::forwarding::State::Running);
+
+        service.shutdown().await;
     }
 
     #[tokio::test]
@@ -157,32 +189,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
+        // 预分配端口
+        let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        drop(listener1);
+
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        drop(listener2);
+
         let mut config = Config::default();
         config.rules.push(ForwardRule::Tcp(TcpRule {
             name: "a".into(),
-            listen: "127.0.0.1:8080".into(),
+            listen: addr1.to_string(),
             target: "127.0.0.1:9090".into(),
             enabled: true,
         }));
 
         let service = Service::start(config.clone(), path).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(service.list_rules().await.len(), 1);
 
         // 添加新规则
         config.rules.push(ForwardRule::Tcp(TcpRule {
             name: "b".into(),
-            listen: "127.0.0.1:8081".into(),
+            listen: addr2.to_string(),
             target: "127.0.0.1:9091".into(),
             enabled: true,
         }));
         service.reload(config.clone()).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(service.list_rules().await.len(), 2);
 
         // 移除旧规则
         config.rules.retain(|r| r.name() != "a");
         service.reload(config).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         let rules = service.list_rules().await;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "b");
+
+        service.shutdown().await;
     }
 }

@@ -6,12 +6,5 @@ http_port = 7000
 type = "tcp"
 name = "test-forward"
 listen = "127.0.0.1:8080"
-target = "127.0.0.1:9090"
-enabled = true
-
-[[rule]]
-type = "serial"
-name = "esp32"
-serial_number = "A50285BIA"
-tcp_port = 7001
+target = "127.0.0.1:8081"
 enabled = true
