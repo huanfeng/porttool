@@ -3,6 +3,7 @@
 use super::{Forwarder, ForwardStatus, RuleType, State};
 use crate::config::TcpRule;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -12,13 +13,14 @@ use tokio::task::JoinHandle;
 pub struct TcpForwarder {
     rule: TcpRule,
     state: Arc<RwLock<ForwarderState>>,
+    /// 原子计数器，避免 Drop 中的异步问题
+    active_connections: Arc<AtomicUsize>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 struct ForwarderState {
     state: State,
     detail: String,
-    active_connections: usize,
 }
 
 impl TcpForwarder {
@@ -28,8 +30,8 @@ impl TcpForwarder {
             state: Arc::new(RwLock::new(ForwarderState {
                 state: State::Stopped,
                 detail: "未启动".into(),
-                active_connections: 0,
             })),
+            active_connections: Arc::new(AtomicUsize::new(0)),
             task: Arc::new(Mutex::new(None)),
         }
     }
@@ -81,7 +83,7 @@ impl Forwarder for TcpForwarder {
         ).await;
 
         // 启动转发任务
-        let state = self.state.clone();
+        let active_conns = self.active_connections.clone();
         let name = self.rule.name.clone();
         let max_conns = self.rule.max_connections;
         let handle = tokio::spawn(async move {
@@ -89,64 +91,69 @@ impl Forwarder for TcpForwarder {
 
             loop {
                 match listener.accept().await {
-                    Ok((client, client_addr)) => {
-                        // 原子地检查并增加计数（使用单个 write 锁）
-                        let should_accept = {
-                            let mut s = state.write().await;
-                            if s.active_connections >= max_conns {
-                                false
-                            } else {
-                                s.active_connections += 1;
-                                true
-                            }
-                        };
+                    Ok((mut client, client_addr)) => {
+                        // 原子地检查并增加计数（无锁，线程安全）
+                        let current = active_conns.fetch_add(1, Ordering::SeqCst);
 
-                        if !should_accept {
+                        if current >= max_conns {
+                            // 已超限，立即递减并拒绝
+                            active_conns.fetch_sub(1, Ordering::SeqCst);
                             tracing::warn!(
                                 "[{}] 达到最大连接数 {}, 拒绝新连接: {}",
                                 name, max_conns, client_addr
                             );
-                            drop(client); // 立即关闭连接
+                            drop(client);
                             continue;
                         }
 
-                        let current = {
-                            let s = state.read().await;
-                            s.active_connections
-                        };
-                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current, max_conns);
+                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current + 1, max_conns);
 
                         // 为每个连接启动独立的转发任务
                         let target = target_addr;
-                        let state_clone = state.clone();
+                        let active_conns_clone = active_conns.clone();
                         let name_clone = name.clone();
                         tokio::spawn(async move {
-                            // 使用 RAII guard 确保计数器始终递减（包括 panic）
+                            // 使用简单的 RAII guard（同步递减，无异步风险）
                             struct ConnectionGuard {
-                                state: Arc<RwLock<ForwarderState>>,
+                                counter: Arc<AtomicUsize>,
                             }
 
                             impl Drop for ConnectionGuard {
                                 fn drop(&mut self) {
-                                    let state = self.state.clone();
-                                    tokio::spawn(async move {
-                                        let mut s = state.write().await;
-                                        s.active_connections = s.active_connections.saturating_sub(1);
-                                    });
+                                    // 原子递减，无需异步，100% 可靠
+                                    self.counter.fetch_sub(1, Ordering::SeqCst);
                                 }
                             }
 
-                            let _guard = ConnectionGuard { state: state_clone };
+                            let _guard = ConnectionGuard { counter: active_conns_clone };
 
-                            if let Err(e) = handle_connection(client, target, &name_clone).await {
-                                tracing::debug!("[{}] 连接处理失败: {}", name_clone, e);
+                            // 先连接目标（带超时），失败时快速释放槽位
+                            let connect_result = tokio::time::timeout(
+                                tokio::time::Duration::from_secs(5),
+                                TcpStream::connect(target)
+                            ).await;
+
+                            let mut server = match connect_result {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(e)) => {
+                                    tracing::debug!("[{}] 连接目标失败: {}", name_clone, e);
+                                    return; // guard drop，释放槽位
+                                }
+                                Err(_) => {
+                                    tracing::debug!("[{}] 连接目标超时", name_clone);
+                                    return;
+                                }
+                            };
+
+                            // 双向转发
+                            if let Err(e) = io::copy_bidirectional(&mut client, &mut server).await {
+                                tracing::debug!("[{}] 数据转发错误: {}", name_clone, e);
                             }
                             // _guard 在此 drop，确保计数器递减
                         });
                     }
                     Err(e) => {
                         tracing::error!("[{}] accept 失败: {}", name, e);
-                        // 短暂等待后继续
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     }
                 }
@@ -170,50 +177,25 @@ impl Forwarder for TcpForwarder {
 
     fn status(&self) -> ForwardStatus {
         // 使用 try_read 避免在 async 上下文中阻塞
-        let state = self.state.try_read()
-            .map(|s| (s.state, s.detail.clone(), s.active_connections))
-            .unwrap_or((State::Stopped, "状态未知".into(), 0));
+        let (state, detail) = self.state.try_read()
+            .map(|s| (s.state, s.detail.clone()))
+            .unwrap_or((State::Stopped, "状态未知".into()));
+
+        // 原子读取连接数
+        let clients = self.active_connections.load(Ordering::SeqCst);
 
         ForwardStatus {
             name: self.rule.name.clone(),
             rule_type: RuleType::Tcp,
-            state: state.0,
-            detail: state.1,
-            clients: state.2,
+            state,
+            detail,
+            clients,
         }
     }
 
     fn name(&self) -> &str {
         &self.rule.name
     }
-}
-
-/// 处理单个 TCP 连接的双向转发
-async fn handle_connection(
-    mut client: TcpStream,
-    target_addr: std::net::SocketAddr,
-    name: &str,
-) -> anyhow::Result<()> {
-    // 连接到目标服务器
-    let mut server = TcpStream::connect(target_addr).await
-        .map_err(|e| anyhow::anyhow!("连接目标 {} 失败: {}", target_addr, e))?;
-
-    tracing::debug!("[{}] 已连接到目标: {}", name, target_addr);
-
-    // 双向数据转发
-    match io::copy_bidirectional(&mut client, &mut server).await {
-        Ok((client_to_server, server_to_client)) => {
-            tracing::debug!(
-                "[{}] 连接关闭: 上行 {} 字节, 下行 {} 字节",
-                name, client_to_server, server_to_client
-            );
-        }
-        Err(e) => {
-            tracing::debug!("[{}] 数据转发错误: {}", name, e);
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
