@@ -168,6 +168,7 @@ mod tests {
             name: "test".into(),
             listen: listen_addr.to_string(),
             target: "127.0.0.1:9090".into(),
+            max_connections: 1000,
             enabled: true,
         }));
 
@@ -203,6 +204,7 @@ mod tests {
             name: "a".into(),
             listen: addr1.to_string(),
             target: "127.0.0.1:9090".into(),
+            max_connections: 1000,
             enabled: true,
         }));
 
@@ -215,6 +217,7 @@ mod tests {
             name: "b".into(),
             listen: addr2.to_string(),
             target: "127.0.0.1:9091".into(),
+            max_connections: 1000,
             enabled: true,
         }));
         service.reload(config.clone()).await.unwrap();

@@ -83,15 +83,31 @@ impl Forwarder for TcpForwarder {
         // 启动转发任务
         let state = self.state.clone();
         let name = self.rule.name.clone();
+        let max_conns = self.rule.max_connections;
         let handle = tokio::spawn(async move {
             tracing::debug!("TCP 转发任务启动: {}", name);
 
             loop {
                 match listener.accept().await {
                     Ok((client, client_addr)) => {
-                        tracing::debug!("[{}] 新连接: {}", name, client_addr);
+                        // 检查连接数限制（先读后判断，避免竞态条件）
+                        let current = {
+                            let s = state.read().await;
+                            s.active_connections
+                        };
 
-                        // 增加活动连接计数
+                        if current >= max_conns {
+                            tracing::warn!(
+                                "[{}] 达到最大连接数 {}, 拒绝新连接: {}",
+                                name, max_conns, client_addr
+                            );
+                            drop(client); // 立即关闭连接
+                            continue;
+                        }
+
+                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current + 1, max_conns);
+
+                        // 先增加计数（在 spawn 之前，防止竞态）
                         {
                             let mut s = state.write().await;
                             s.active_connections += 1;
@@ -220,6 +236,7 @@ mod tests {
             name: "test".into(),
             listen: "127.0.0.1:0".into(), // 随机端口
             target: echo_addr.to_string(),
+            max_connections: 1000,
             enabled: true,
         };
 
@@ -231,6 +248,7 @@ mod tests {
         // 更新规则使用实际地址
         let rule = TcpRule {
             listen: listen_addr.to_string(),
+            max_connections: 1000,
             ..rule
         };
 
@@ -278,6 +296,7 @@ mod tests {
             name: "multi-test".into(),
             listen: listen_addr.to_string(),
             target: echo_addr.to_string(),
+            max_connections: 1000,
             enabled: true,
         };
 
@@ -316,6 +335,7 @@ mod tests {
             name: "bad-listen".into(),
             listen: "999.999.999.999:9999".into(),
             target: "127.0.0.1:80".into(),
+            max_connections: 1000,
             enabled: true,
         };
 
@@ -335,6 +355,7 @@ mod tests {
             name: "bad-target".into(),
             listen: listen_addr.to_string(),
             target: "127.0.0.1:1".into(), // 不存在的服务
+            max_connections: 100,
             enabled: true,
         };
 

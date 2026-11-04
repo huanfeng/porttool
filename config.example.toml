@@ -64,4 +64,6 @@ type = "tcp"
 name = "local-forward"
 listen = "127.0.0.1:9090"
 target = "192.168.1.100:80"
+# 最大并发连接数（默认 1000）
+max_connections = 1000
 enabled = true

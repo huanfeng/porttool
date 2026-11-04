@@ -136,8 +136,15 @@ pub struct TcpRule {
     pub listen: String,
     /// 目标地址（如 "192.168.1.100:80"）
     pub target: String,
+    /// 最大并发连接数（默认 1000）
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+fn default_max_connections() -> usize {
+    1000
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
