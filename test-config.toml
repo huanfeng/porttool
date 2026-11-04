@@ -1,0 +1,17 @@
+[server]
+bind = "127.0.0.1"
+http_port = 7000
+
+[[rule]]
+type = "tcp"
+name = "test-forward"
+listen = "127.0.0.1:8080"
+target = "127.0.0.1:9090"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "esp32"
+serial_number = "A50285BIA"
+tcp_port = 7001
+enabled = true

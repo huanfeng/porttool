@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/comhub-core", "crates/comhubw", "crates/comhub"]
+members = ["crates/comhub-core", "crates/comhubw", "crates/comhub", "crates/porttool-core", "crates/porttool", "crates/porttoolw"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 comhub-core = { path = "crates/comhub-core" }
+porttool-core = { path = "crates/porttool-core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +19,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
+async-trait = "0.1"
 
 [profile.release]
 lto = true

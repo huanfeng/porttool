@@ -1,0 +1,17 @@
+[package]
+name = "porttoolw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+porttool-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+windui = "0.30"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
