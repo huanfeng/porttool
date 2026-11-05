@@ -7,21 +7,12 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// 完整配置
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
     #[serde(rename = "rule")]
     pub rules: Vec<ForwardRule>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            rules: Vec::new(),
-        }
-    }
 }
 
 /// 服务器配置
@@ -126,6 +117,34 @@ pub struct SshRule {
     pub auto_reconnect: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl SshRule {
+    /// 字段安全检查：这些值会原样传给 `ssh` 命令行，不能被当成选项或带入换行
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let t = &self.ssh_target;
+        if t.trim().is_empty() || t.starts_with('-') || t.chars().any(char::is_whitespace) {
+            return Err(format!("SSH 规则 `{}` 的 ssh_target 无效", self.name));
+        }
+        if self
+            .identity_file
+            .as_ref()
+            .is_some_and(|p| p.is_empty() || p.contains(['\0', '\n', '\r']))
+        {
+            return Err(format!("SSH 规则 `{}` 的私钥路径无效", self.name));
+        }
+        if self.ssh_port == Some(0) {
+            return Err(format!("SSH 规则 `{}` 的 ssh_port 必须在 1-65535 范围内", self.name));
+        }
+        let h = &self.remote_host;
+        if h.is_empty() || h.starts_with('-') || h.chars().any(char::is_whitespace) {
+            return Err(format!("SSH 规则 `{}` 的 remote_host 无效", self.name));
+        }
+        if self.local_port == 0 || self.remote_port == 0 {
+            return Err(format!("SSH 规则 `{}` 的端口必须在 1-65535 范围内", self.name));
+        }
+        Ok(())
+    }
 }
 
 /// TCP 端口转发规则
@@ -245,12 +264,7 @@ impl Config {
                     }
                 }
                 ForwardRule::Ssh(r) => {
-                    if r.ssh_target.trim().is_empty() {
-                        bail!("SSH 规则 `{}` 的 ssh_target 不能为空", r.name);
-                    }
-                    if r.local_port == 0 || r.remote_port == 0 {
-                        bail!("SSH 规则 `{}` 的端口必须在 1-65535 范围内", r.name);
-                    }
+                    r.check().map_err(|e| anyhow::anyhow!(e))?;
                 }
                 ForwardRule::Tcp(r) => {
                     // 验证地址格式
