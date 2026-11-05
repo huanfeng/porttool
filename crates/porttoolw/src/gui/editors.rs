@@ -10,6 +10,7 @@ use porttool_core::config::{
     Direction, Encoding, ForwardRule, SerialRule, SshRule, TcpRule, TerminalMode,
 };
 use porttool_core::devices;
+use porttool_core::ssh_config;
 use windui::prelude::*;
 
 use super::model::Kind;
@@ -401,6 +402,8 @@ struct SshEditor {
     original: Rc<RefCell<Option<(String, u16)>>>,
     name: Signal<String>,
     target: Signal<String>,
+    /// `~/.ssh/config` 里的服务器别名，打开对话框时读取，可刷新
+    servers: Signal<Vec<String>>,
     ssh_port: Signal<String>,
     identity: Signal<String>,
     direction: Signal<usize>,
@@ -422,6 +425,7 @@ impl SshEditor {
             original: Rc::new(RefCell::new(None)),
             name: signal(String::new()),
             target: signal(String::new()),
+            servers: signal(Vec::new()),
             ssh_port: signal(String::new()),
             identity: signal(String::new()),
             direction: signal(0),
@@ -437,6 +441,7 @@ impl SshEditor {
     }
 
     fn open(&self, config: &porttool_core::Config, name: Option<String>) {
+        self.servers.set(porttool_core::ssh_config::available_servers());
         let existing = name.as_deref().and_then(|n| {
             config.rules.iter().find_map(|r| match r {
                 ForwardRule::Ssh(s) if s.name == n => Some(s.clone()),
@@ -496,10 +501,13 @@ impl SshEditor {
             "" => None,
             t => Some(parse_port(t, "SSH 端口")?),
         };
+        let ssh_target = self.target.get().trim().to_string();
+        // 目标会原样传给 ssh 命令行，拒绝能被当成选项的输入
+        ssh_config::valid_target(&ssh_target).map_err(|e| format!("SSH 服务器：{e}"))?;
         let identity = self.identity.get().trim().to_string();
         let rule = SshRule {
             name,
-            ssh_target: self.target.get().trim().to_string(),
+            ssh_target,
             ssh_port,
             identity_file: (!identity.is_empty()).then_some(identity),
             direction: if self.direction.get() == 1 { Direction::Remote } else { Direction::Local },
@@ -538,9 +546,21 @@ impl SshEditor {
             ))
             .child(Element::field(
                 "SSH 服务器",
-                Element::text_input(self.target, "user@host 或 ~/.ssh/config 里的别名")
-                    .width(FIELD_W)
-                    .on_commit(upd.clone()),
+                Element::hstack()
+                    .child(
+                        Element::combo_box(self.target, Vec::<String>::new())
+                            .options_signal(self.servers)
+                            .width(FIELD_W - 48)
+                            .on_commit(upd.clone()),
+                    )
+                    .child(
+                        Element::icon_button("⟳")
+                            .tooltip("重新读取 ~/.ssh/config")
+                            .on_click({
+                                let servers = self.servers;
+                                move |_| servers.set(ssh_config::available_servers())
+                            }),
+                    ),
             ))
             .child(Element::field(
                 "SSH 端口",
