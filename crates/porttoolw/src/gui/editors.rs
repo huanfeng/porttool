@@ -14,6 +14,7 @@ use porttool_core::ssh_config;
 use windui::prelude::*;
 
 use super::model::Kind;
+use super::model;
 use super::{ui, Gui};
 
 const MODES: [&str; 2] = ["telnet", "raw"];
@@ -78,6 +79,33 @@ fn store(gui: &Gui, original: Option<&str>, rule: ForwardRule) -> Result<(), Str
     }
     config.validate().map_err(|e| format!("{e:#}"))?;
     gui.apply_config(config).map_err(|e| format!("{e:#}"))
+}
+
+/// 配置里所有被占用的监听端口：串口的 tcp 端口、SSH 的监听端口、TCP 的监听端口和 HTTP 端口。
+fn used_ports(config: &porttool_core::Config) -> Vec<u16> {
+    let mut used = vec![config.server.http_port];
+    for rule in &config.rules {
+        match rule {
+            ForwardRule::Serial(r) => used.push(r.tcp_port),
+            ForwardRule::Ssh(r) => {
+                used.push(r.local_port);
+                if let Some(p) = r.ssh_port {
+                    used.push(p);
+                }
+            }
+            ForwardRule::Tcp(r) => {
+                if let Some(p) = r.listen.rsplit(':').next().and_then(|p| p.parse().ok()) {
+                    used.push(p);
+                }
+            }
+        }
+    }
+    used
+}
+
+/// 从候选端口里挑第一个能绑定成功的；找不到返回 `None`（交回人工填写）。
+fn first_free_port(used: &[u16]) -> Option<u16> {
+    model::next_candidate_ports(used).into_iter().find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok())
 }
 
 fn parse_port(text: &str, what: &str) -> Result<u16, String> {
@@ -404,6 +432,10 @@ struct SshEditor {
     target: Signal<String>,
     /// `~/.ssh/config` 里的服务器别名，打开对话框时读取，可刷新
     servers: Signal<Vec<String>>,
+    /// 打开对话框时的现有规则名，自动取名要避开
+    names: Rc<RefCell<Vec<String>>>,
+    /// 上一次自动生成的名字：它还显示在名称框里时才被下一次自动生成覆盖
+    last_auto: Rc<RefCell<String>>,
     ssh_port: Signal<String>,
     identity: Signal<String>,
     direction: Signal<usize>,
@@ -426,6 +458,8 @@ impl SshEditor {
             name: signal(String::new()),
             target: signal(String::new()),
             servers: signal(Vec::new()),
+            names: Rc::new(RefCell::new(Vec::new())),
+            last_auto: Rc::new(RefCell::new(String::new())),
             ssh_port: signal(String::new()),
             identity: signal(String::new()),
             direction: signal(0),
@@ -448,13 +482,16 @@ impl SshEditor {
                 _ => None,
             })
         });
+        *self.names.borrow_mut() = config.rules.iter().map(|r| r.name().to_string()).collect();
+        *self.last_auto.borrow_mut() = existing.as_ref().map(|e| e.name.clone()).unwrap_or_default();
         let r = existing.clone().unwrap_or(SshRule {
             name: String::new(),
             ssh_target: String::new(),
             ssh_port: None,
             identity_file: None,
             direction: Direction::Local,
-            local_port: 8080,
+            // 监听端口自动分配：接着现有规则用过的最大端口号试绑，避开占用
+            local_port: first_free_port(&used_ports(config)).unwrap_or(8080),
             remote_host: "127.0.0.1".into(),
             remote_port: 80,
             auto_reconnect: true,
@@ -530,6 +567,27 @@ impl SshEditor {
             let t = self.clone();
             move |_: &mut windui::core::EventCtx| t.update_preview()
         };
+        // 选好 SSH 服务器后自动取名（只在名称为空或仍是上次自动名时替换，不冲掉手改的名字）
+        let auto_name = {
+            let t = self.clone();
+            move |_: &mut windui::core::EventCtx| {
+                if self_is_new(&t.original) {
+                    let current = t.name.get();
+                    let generated = t.last_auto.borrow().clone();
+                    if current.trim().is_empty() || current == generated {
+                        let name = model::suggested_name(
+                            &t.target.get(),
+                            t.names.borrow().as_slice(),
+                        );
+                        t.last_auto.borrow_mut().clone_from(&name);
+                        t.name.set(name);
+                    }
+                }
+            }
+        };
+        fn self_is_new(original: &RefCell<Option<(String, u16)>>) -> bool {
+            original.borrow().is_none()
+        }
 
         let body = Element::col()
             .width_match()
@@ -551,7 +609,14 @@ impl SshEditor {
                         Element::combo_box(self.target, Vec::<String>::new())
                             .options_signal(self.servers)
                             .width(FIELD_W - 48)
-                            .on_commit(upd.clone()),
+                            .on_commit({
+                                let upd = upd.clone();
+                                let auto_name = auto_name.clone();
+                                move |ctx| {
+                                    upd(ctx);
+                                    auto_name(ctx);
+                                }
+                            }),
                     )
                     .child(
                         Element::icon_button("⟳")
@@ -671,12 +736,15 @@ impl TcpEditor {
                 _ => None,
             })
         });
-        let r = existing.clone().unwrap_or(TcpRule {
-            name: String::new(),
-            listen: "0.0.0.0:8080".into(),
-            target: "192.168.1.100:80".into(),
-            max_connections: 1000,
-            enabled: true,
+        let r = existing.clone().unwrap_or_else(|| {
+            let port = first_free_port(&used_ports(config)).unwrap_or(8080);
+            TcpRule {
+                name: String::new(),
+                listen: format!("0.0.0.0:{port}"),
+                target: "192.168.1.100:80".into(),
+                max_connections: 1000,
+                enabled: true,
+            }
         });
         *self.original.borrow_mut() = existing.as_ref().map(|e| e.name.clone());
         self.title.set(if existing.is_some() { "编辑 TCP 转发".into() } else { "添加 TCP 转发".into() });

@@ -339,6 +339,44 @@ pub fn failures(rows: &[RuleRow]) -> Vec<&RuleRow> {
     rows.iter().filter(|r| r.tone == Tone::Bad).collect()
 }
 
+/// 从 ssh 目标推断规则名：取别名或主机段（去掉 user@、端口和路径），小写，
+/// 规则名不允许的字符（点、空格等）按词折叠成 `-`。
+pub fn suggested_name(target: &str, existing: &[String]) -> String {
+    let host = target.trim().split('@').next_back().unwrap_or("");
+    let host = host.split([':', '/']).next().unwrap_or(host);
+    let words: Vec<String> = host
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
+    let base = if words.is_empty() { "ssh".into() } else { words.join("-") };
+    unique_name(&base, existing)
+}
+
+/// 与现有规则名（不区分大小写）不重复的名字；重名依次加 `-2`、`-3`。
+pub fn unique_name(base: &str, existing: &[String]) -> String {
+    (1..)
+        .map(|i| if i == 1 { base.to_string() } else { format!("{base}-{i}") })
+        .find(|n| !existing.iter().any(|e| e.eq_ignore_ascii_case(n)))
+        .unwrap_or_else(|| format!("{base}-n"))
+}
+
+/// 新规则的候选监听端口：从已用端口最大值 +1（且至少 7001）开始，给出一段候选
+/// （探测可绑定时逐个试，见 editors 的 `first_free_port`）。
+pub fn next_candidate_ports(used: &[u16]) -> Vec<u16> {
+    let start = used
+        .iter()
+        .copied()
+        .max()
+        .map_or(7_001, |p| p.saturating_add(1))
+        .max(7_001) as u32;
+    (start..)
+        .take(64)
+        .take_while(|p| *p <= u16::MAX as u32)
+        .filter_map(|p| u16::try_from(p).ok())
+        .collect()
+}
+
 /// 按类型和关键字筛选；关键字匹配名称、路径、副行（不区分大小写）。
 pub fn filter_rows(rows: &[RuleRow], kind: Option<Kind>, query: &str) -> Vec<RuleRow> {
     let q = query.trim().to_lowercase();
@@ -451,5 +489,41 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(3 * 1_048_576), "3.0 MB");
+    }
+
+    #[test]
+    fn names_suggested_from_targets() {
+        // 别名整段可用；user@ 取 host 段；点换成 - 并折叠
+        assert_eq!(suggested_name("dev-board", &[]), "dev-board");
+        assert_eq!(suggested_name("ops@jump.example.com", &[]), "jump-example-com");
+        assert_eq!(suggested_name("192.168.5.88", &[]), "192-168-5-88");
+        assert_eq!(suggested_name(" user@X-Board ", &[]), "x-board");
+        // 端口与会话路径被裁掉
+        assert_eq!(suggested_name("dev-board:2222", &[]), "dev-board");
+        assert!(suggested_name("-oProxyCommand=calc", &[]).starts_with("oproxycommand"));
+        // 与现有规则重名时加序号
+        assert_eq!(suggested_name("web", &["web".into()]), "web-2");
+        assert_eq!(suggested_name("web", &["web".into(), "WEB-2".into()]), "web-3");
+        // 目标无效时兜底
+        assert_eq!(suggested_name("@@", &[]), "ssh");
+    }
+
+    #[test]
+    fn unique_names_skip_taken() {
+        assert_eq!(unique_name("a", &[]), "a");
+        assert_eq!(unique_name("a", &["a".into(), "A-2".into()]), "a-3");
+    }
+
+    #[test]
+    fn candidate_ports_start_after_used() {
+        let used = [7001u16, 7002, 8443];
+        let ports = next_candidate_ports(&used);
+        assert_eq!(ports.len(), 64);
+        assert_eq!(ports[0], 8444);
+        assert_eq!(ports[1], 8445);
+        // 没有已用端口时从 7001 起
+        assert_eq!(next_candidate_ports(&[])[0], 7001);
+        // 相邻端口不重复
+        assert_eq!(next_candidate_ports(&[65535]).len(), 1, "到顶为止");
     }
 }
