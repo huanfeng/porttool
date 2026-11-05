@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "porttool", version, about = "多协议端口转发工具")]
+#[command(name = "ptl", version, about = "多协议端口转发工具")]
 struct Cli {
     /// 配置文件路径
     #[arg(long, env = "PORTTOOL_CONFIG")]

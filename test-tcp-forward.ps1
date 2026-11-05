@@ -24,7 +24,7 @@ $echoServer = Start-Job -ScriptBlock {
 Start-Sleep -Seconds 1
 
 Write-Host "`n启动 PortTool 服务..." -ForegroundColor Green
-$porttool = Start-Process -FilePath "cargo" -ArgumentList "run", "-p", "porttool", "--", "serve", "--config", "test-config.toml" -PassThru -NoNewWindow
+$porttool = Start-Process -FilePath "cargo" -ArgumentList "run", "-p", "porttool", "--bin", "ptl", "--", "serve", "--config", "test-config.toml" -PassThru -NoNewWindow
 
 Start-Sleep -Seconds 2
 
