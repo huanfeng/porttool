@@ -15,6 +15,18 @@
 
 设计见 [docs/DESIGN.md](docs/DESIGN.md)，AI 接入见 [docs/AI.md](docs/AI.md)。
 
+## 安装
+
+Windows 上用 [Scoop](https://scoop.sh)：
+
+```sh
+scoop bucket add huanfeng https://github.com/huanfeng/scoop-bucket
+scoop install porttool
+```
+
+装完后 `porttoolw`（托盘程序）和 `porttool`（命令行）都在 PATH 上。也可以从
+[Releases](https://github.com/huanfeng/porttool/releases) 下载 zip 解压使用。
+
 ## 构建
 
 ```sh

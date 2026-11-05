@@ -1,7 +1,7 @@
 {
-  "name": "comhub",
-  "bin": "comhub.exe,comhubw.exe",
-  "description": "Share local serial ports over the LAN with terminals and AI (tray app + CLI)",
-  "homepage": "https://github.com/huanfeng/comhub",
+  "name": "porttool",
+  "bin": "porttool.exe,porttoolw.exe",
+  "description": "Serial sharing plus SSH and TCP port forwarding in one tray app and CLI",
+  "homepage": "https://github.com/huanfeng/porttool",
   "license": "MIT OR Apache-2.0"
 }

@@ -42,8 +42,8 @@ jobs:
             throw "tag ($tag) 不是 v<major>.<minor>.<patch> 形式"
           }
           $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $pkg = $meta.packages | Where-Object { $_.name -eq 'comhub' } | Select-Object -First 1
-          if (-not $pkg) { throw "cargo metadata 里找不到包 comhub" }
+          $pkg = $meta.packages | Where-Object { $_.name -eq 'porttool' } | Select-Object -First 1
+          if (-not $pkg) { throw "cargo metadata 里找不到包 porttool" }
           if ($tag -ne $pkg.version) {
             throw "tag ($tag) 与 workspace 版本 ($($pkg.version)) 不一致：先改 Cargo.toml 的 [workspace.package].version，再打 tag"
           }
@@ -68,8 +68,8 @@ jobs:
           # 压缩包里**不套一层目录**。scoop 是直接解压到应用目录的，多一层壳就得靠
           # 清单里的 extract_dir，而那个值带版本号——自动更新的清单维护不了它。
           Compress-Archive -Force `
-            -Path target\release\comhub.exe, target\release\comhubw.exe, README.md `
-            -DestinationPath "dist\comhub-$ver-windows-x86_64.zip"
+            -Path target\release\porttool.exe, target\release\porttoolw.exe, README.md `
+            -DestinationPath "dist\porttool-$ver-windows-x86_64.zip"
           Get-ChildItem dist
 
       - name: Create release
