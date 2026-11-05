@@ -8,6 +8,7 @@ pub mod http;
 pub mod logfile;
 pub mod port;
 pub mod service;
+pub mod ssh_config;
 pub mod terminal;
 pub mod text;
 

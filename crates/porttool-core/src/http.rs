@@ -22,6 +22,7 @@ use crate::devices;
 use crate::forwarding::ForwardStatus;
 use crate::port::{PortHub, PortSnapshot, PortState};
 use crate::service::Service;
+use crate::ssh_config;
 
 const USAGE: &str = include_str!("usage.md");
 const MAX_TIMEOUT_SECS: f64 = 600.0;
@@ -38,6 +39,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/rules/{name}/disable", post(disable_rule))
         .route("/ports", get(list_ports))
         .route("/devices", get(list_devices))
+        .route("/ssh/servers", get(ssh_servers))
         .route("/ports/{name}/tail", get(tail))
         .route("/ports/{name}/log", get(log))
         .route("/ports/{name}/grep", get(grep))
@@ -304,6 +306,18 @@ async fn list_ports(State(service): State<Arc<Service>>, Query(params): Query<Pa
         json(&ports)
     } else {
         text(ports_table(&ports))
+    }
+}
+
+/// `~/.ssh/config` 里的服务器别名，供填写 SSH 规则的 ssh_target
+async fn ssh_servers(Query(params): Query<Params>) -> Response {
+    let servers = tokio::task::spawn_blocking(ssh_config::available_servers)
+        .await
+        .unwrap_or_default();
+    if params.json() {
+        json(&servers)
+    } else {
+        text(servers.join("\n") + "\n")
     }
 }
 

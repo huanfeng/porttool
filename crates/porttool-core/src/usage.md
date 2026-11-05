@@ -22,6 +22,7 @@ PortTool 把本机串口共享到网络上。通过这个接口可以读取设�
 | POST | `/rules/{name}/disable` | 停止 SSH / TCP 规则 |
 | GET | `/ports` | 串口列表和状态 |
 | GET | `/devices` | 本机所有串口设备（用于配置） |
+| GET | `/ssh/servers` | `~/.ssh/config` 里的服务器别名（用于填写 ssh_target） |
 | GET | `/ports/{name}/tail?lines=200` | 最近 N 行 |
 | GET | `/ports/{name}/log?since=<seq>&limit=1000` | seq 大于 since 的行；最后一行是 `-- next_seq=<n>`，下次带上 `since=<n>` |
 | GET | `/ports/{name}/grep?pattern=<regex>&limit=200` | 在最近的日志中搜索（正则） |
