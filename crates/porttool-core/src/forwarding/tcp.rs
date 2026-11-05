@@ -92,12 +92,26 @@ impl Forwarder for TcpForwarder {
             loop {
                 match listener.accept().await {
                     Ok((mut client, client_addr)) => {
-                        // 原子地检查并增加计数（无锁，线程安全）
-                        let current = active_conns.fetch_add(1, Ordering::SeqCst);
+                        // 使用 CAS 循环原子地检查并增加计数（真正无竞态）
+                        let acquired = loop {
+                            let current = active_conns.load(Ordering::SeqCst);
+                            if current >= max_conns {
+                                // 已达上限
+                                break false;
+                            }
+                            // 尝试原子地从 current 增加到 current+1
+                            match active_conns.compare_exchange(
+                                current,
+                                current + 1,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            ) {
+                                Ok(_) => break true, // 成功获取槽位
+                                Err(_) => continue,  // CAS 失败，重试
+                            }
+                        };
 
-                        if current >= max_conns {
-                            // 已超限，立即递减并拒绝
-                            active_conns.fetch_sub(1, Ordering::SeqCst);
+                        if !acquired {
                             tracing::warn!(
                                 "[{}] 达到最大连接数 {}, 拒绝新连接: {}",
                                 name, max_conns, client_addr
@@ -106,28 +120,15 @@ impl Forwarder for TcpForwarder {
                             continue;
                         }
 
-                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current + 1, max_conns);
+                        let current = active_conns.load(Ordering::SeqCst);
+                        tracing::debug!("[{}] 新连接: {} ({}/{})", name, client_addr, current, max_conns);
 
                         // 为每个连接启动独立的转发任务
                         let target = target_addr;
                         let active_conns_clone = active_conns.clone();
                         let name_clone = name.clone();
                         tokio::spawn(async move {
-                            // 使用简单的 RAII guard（同步递减，无异步风险）
-                            struct ConnectionGuard {
-                                counter: Arc<AtomicUsize>,
-                            }
-
-                            impl Drop for ConnectionGuard {
-                                fn drop(&mut self) {
-                                    // 原子递减，无需异步，100% 可靠
-                                    self.counter.fetch_sub(1, Ordering::SeqCst);
-                                }
-                            }
-
-                            let _guard = ConnectionGuard { counter: active_conns_clone };
-
-                            // 先连接目标（带超时），失败时快速释放槽位
+                            // 先连接目标（5 秒超时），失败时快速释放槽位
                             let connect_result = tokio::time::timeout(
                                 tokio::time::Duration::from_secs(5),
                                 TcpStream::connect(target)
@@ -136,14 +137,31 @@ impl Forwarder for TcpForwarder {
                             let mut server = match connect_result {
                                 Ok(Ok(stream)) => stream,
                                 Ok(Err(e)) => {
+                                    // 连接失败，立即释放槽位（无 guard 开销）
+                                    active_conns_clone.fetch_sub(1, Ordering::SeqCst);
                                     tracing::debug!("[{}] 连接目标失败: {}", name_clone, e);
-                                    return; // guard drop，释放槽位
+                                    return;
                                 }
                                 Err(_) => {
+                                    // 连接超时，立即释放槽位
+                                    active_conns_clone.fetch_sub(1, Ordering::SeqCst);
                                     tracing::debug!("[{}] 连接目标超时", name_clone);
                                     return;
                                 }
                             };
+
+                            // 连接成功后使用 guard 保证释放
+                            struct ConnectionGuard {
+                                counter: Arc<AtomicUsize>,
+                            }
+
+                            impl Drop for ConnectionGuard {
+                                fn drop(&mut self) {
+                                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                                }
+                            }
+
+                            let _guard = ConnectionGuard { counter: active_conns_clone };
 
                             // 双向转发
                             if let Err(e) = io::copy_bidirectional(&mut client, &mut server).await {
