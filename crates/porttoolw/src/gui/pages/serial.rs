@@ -4,7 +4,7 @@ use windui::prelude::*;
 
 use super::page_body;
 use crate::gui::model::{Kind, RuleRow, SerialDetail};
-use crate::gui::ui::{mono, page_header, panel, status_pill};
+use crate::gui::ui::{mono, page_header, panel};
 use crate::gui::Gui;
 
 const DETAIL_W: i32 = 340;
@@ -35,7 +35,6 @@ pub fn view(gui: &Gui) -> Element {
             .weight(1.0),
         )
         .child(add_card(gui));
-
     let g = gui.clone();
     let detail = Element::col().width(DETAIL_W).height_match().child(Element::host_signal(
         gui.serial_detail,
@@ -48,38 +47,8 @@ pub fn view(gui: &Gui) -> Element {
 }
 
 fn card(gui: &Gui, r: RuleRow) -> Element {
-    let selected = gui.selected_serial;
-    let name = r.name.clone();
-    let name2 = r.name.clone();
-    let accent_bg = move || {
-        if selected.with(|s| *s == name2) {
-            windui::theme::current().palette.accent.scale_alpha(0.10)
-        } else {
-            windui::theme::current().palette.surface
-        }
-    };
-    Element::col()
-        .width_match()
-        .padding(16)
-        .spacing(8)
-        .corner(10.0)
-        .border_role(Role::Divider, 1)
-        .clickable()
-        .bg_when(accent_bg)
-        .on_click(move |_| selected.set(name.clone()))
-        .child(
-            Element::hstack()
-                .width_match()
-                .child(Element::label(r.name.clone()).font_size(16.0).font_weight(700))
-                .child(status_pill(&r.status, r.tone).tooltip(r.detail.clone()))
-                .child(Element::flex_spacer())
-                .child(super::row_actions(gui, &r)),
-        )
-        .child(mono(r.path.clone()))
-        .child(
-            Element::label(format!("{} · {} · {}", r.conns, r.traffic, r.sub))
-                .fg_role(Role::TextMuted),
-        )
+    let middle = vec![mono(r.path.clone()), super::sub_line(&r)];
+    super::rule_card(gui, &r, middle, Some(gui.selected_serial))
 }
 
 fn add_card(gui: &Gui) -> Element {

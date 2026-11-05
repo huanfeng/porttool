@@ -1,10 +1,10 @@
-//! SSH 转发页：每条规则一张卡片，展示「本机监听 → SSH 服务器 → 目标」三段流程。
+//! SSH 转发页：每条规则一张统一风格的规则卡片，展示「本机监听 → SSH 服务器 → 目标」三段流程。
 
 use windui::prelude::*;
 
-use super::{more_button, page_body};
+use super::{page_body, rule_card};
 use crate::gui::model::{Kind, RuleRow};
-use crate::gui::ui::{info_block, page_header, status_pill};
+use crate::gui::ui::{info_block, page_header};
 use crate::gui::Gui;
 
 pub fn view(gui: &Gui) -> Element {
@@ -33,43 +33,29 @@ pub fn view(gui: &Gui) -> Element {
 }
 
 fn card(gui: &Gui, r: RuleRow) -> Element {
-    let edit = {
-        let (gui, name) = (gui.clone(), r.name.clone());
-        Element::icon_button("✎").tooltip("编辑").on_click(move |_| {
-            gui.editors.open(&gui, Kind::Ssh, Some(name.clone()))
-        })
+    let middle = {
+        let arrow = || Element::label("→").font_size(20.0).fg_role(Role::TextMuted);
+        let flow = Element::row()
+            .width_match()
+            .cross(Align::Center)
+            .spacing(12)
+            .child(info_block("本机监听", &r.from).weight(1.0))
+            .child(arrow())
+            .child(info_block("SSH 服务器", &r.via).weight(1.0).bg_role_alpha(Role::Success, 0.14))
+            .child(arrow())
+            .child(info_block("目标", &r.to).weight(1.0));
+        // 重连详情只在有内容时显示（正常/停止时为空）
+        let detail = r.detail.lines().last().unwrap_or("").trim().to_string();
+        (!detail.is_empty())
+            .then(|| {
+                Element::label(detail)
+                    .fg_role(Role::TextMuted)
+                    .max_lines(1)
+                    .width_match()
+            })
+            .into_iter()
+            .chain(std::iter::once(flow))
+            .collect::<Vec<_>>()
     };
-    let detail = r.detail.lines().last().unwrap_or("").trim().to_string();
-    let head = Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .spacing(10)
-        .child(Element::label(r.name.clone()).font_size(16.0).font_weight(700))
-        .child(Element::badge_intent(r.tag.clone(), Intent::Success))
-        .child(status_pill(&r.status, r.tone))
-        .child(Element::label(detail).fg_role(Role::TextMuted).weight(1.0).max_lines(1))
-        .child(super::row_actions_without_more(gui, &r))
-        .child(edit)
-        .child(more_button(gui, Kind::Ssh, &r.name));
-
-    let arrow = || Element::label("→").font_size(20.0).fg_role(Role::TextMuted);
-    let flow = Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .spacing(12)
-        .child(info_block("本机监听", &r.from).weight(1.0))
-        .child(arrow())
-        .child(info_block("SSH 服务器", &r.via).weight(1.0).bg_role_alpha(Role::Success, 0.14))
-        .child(arrow())
-        .child(info_block("目标", &r.to).weight(1.0));
-
-    Element::col()
-        .width_match()
-        .padding(16)
-        .spacing(12)
-        .bg_role(Role::Surface)
-        .border_role(Role::Divider, 1)
-        .corner(10.0)
-        .child(head)
-        .child(flow)
+    rule_card(gui, &r, middle, None)
 }
