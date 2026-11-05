@@ -1,6 +1,6 @@
-# 让 AI 使用 ComHub
+# 让 AI 使用 PortTool
 
-ComHub 不依赖 MCP。AI 只要能执行 shell 命令，就可以通过 `comhub` 或 `curl` 使用它。
+PortTool 不依赖 MCP。AI 只要能执行 shell 命令，就可以通过 `porttool` 或 `curl` 使用它。
 
 ## 方式一：Claude Code Skill（推荐）
 
@@ -14,18 +14,18 @@ Claude Code 会在需要查看串口日志时自动加载。
 ```markdown
 ## 串口设备调试
 
-设备串口由 ComHub 服务独占并共享，不要直接打开 COM 口，统一用 `comhub`：
-- `comhub list` 查看设备及状态
-- `comhub tail <name> -n 200` 最近日志；`comhub log <name> --since <seq>` 增量读取
-- `comhub grep <name> "(?i)error"` 搜索
-- `comhub send <name> "<cmd>" --expect "<正则>" --timeout 10` 发命令并等待结果（超时退出码 3，只匹配设备输出）
-- `comhub wait <name> "<正则>" --timeout 60` 等待某条日志
-完整说明见 `comhub --help` 和 `comhub doc`。
+设备串口由 PortTool 服务独占并共享，不要直接打开 COM 口，统一用 `porttool`：
+- `porttool ports` 查看串口设备及状态（`porttool list` 看全部转发规则）
+- `porttool tail <name> -n 200` 最近日志；`porttool log <name> --since <seq>` 增量读取
+- `porttool grep <name> "(?i)error"` 搜索
+- `porttool send <name> "<cmd>" --expect "<正则>" --timeout 10` 发命令并等待结果（超时退出码 3，只匹配设备输出）
+- `porttool wait <name> "<正则>" --timeout 60` 等待某条日志
+完整说明见 `porttool --help` 和 `porttool doc`。
 ```
 
 ## 方式三：只有 HTTP
 
-局域网中的其它机器上没有 `comhub` 时，先让 AI 读一下接口说明：
+局域网中的其它机器上没有 `porttool` 时，先让 AI 读一下接口说明：
 
 ```sh
 curl http://<host>:7000/

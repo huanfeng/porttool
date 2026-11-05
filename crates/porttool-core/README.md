@@ -17,8 +17,11 @@ PortTool 核心服务库，提供串口、SSH、TCP 端口转发功能。
 porttool-core/
 ├── config.rs          # 配置文件读写与校验（TOML）
 ├── service.rs         # 服务总入口，管理所有转发规则
+├── port.rs            # 串口：PortHub（IO 线程、热插拔、缓冲、日志）
+├── terminal.rs        # 串口的 Telnet / Raw 终端服务
+├── http.rs            # HTTP 接口
+├── buffer.rs / logfile.rs / text.rs / devices.rs
 └── forwarding/
-    ├── serial.rs      # 串口转发实现
     ├── ssh.rs         # SSH 转发实现
     └── tcp.rs         # TCP 转发实现
 ```
@@ -30,8 +33,8 @@ use porttool_core::{Config, Service};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::load("config.toml")?;
-    let service = Service::start(config, "config.toml".into()).await?;
+    let config = Config::load("config.toml".as_ref())?;
+    let service = Service::start(config, "config.toml".into(), |_event| {}).await?;
     
     // 列出所有规则状态
     let rules = service.list_rules().await;
@@ -39,8 +42,8 @@ async fn main() -> anyhow::Result<()> {
         println!("{}: {:?}", rule.name, rule.state);
     }
     
-    // 启用规则
-    service.enable_rule("esp32").await?;
+    // 启动 / 停止 SSH、TCP 规则
+    service.enable_rule("dev-proxy").await?;
     
     // 等待退出信号
     tokio::signal::ctrl_c().await?;
@@ -55,13 +58,12 @@ async fn main() -> anyhow::Result<()> {
 
 ## 开发状态
 
-- [x] Phase 1: 项目结构与配置模块
-- [ ] Phase 2: 串口转发实现（迁移 comhub-core）
-- [ ] Phase 3: TCP 转发实现
-- [ ] Phase 4: SSH 转发实现（迁移 porttool）
-- [ ] Phase 5: HTTP API
-- [ ] Phase 6: CLI 工具
-- [ ] Phase 7: 跨平台测试
+- [x] 配置模块（`[[rule]]`：serial / ssh / tcp）
+- [x] TCP 转发
+- [x] SSH 转发（托管系统 ssh，瞬时故障自动重连）
+- [x] 串口共享（PortHub、热插拔、日志、Telnet 终端）
+- [x] HTTP 接口（`/rules`、`/ports/...`）
+- [x] 命令行（`porttool`）与托盘 GUI（`porttoolw`）
 
 ## License
 
