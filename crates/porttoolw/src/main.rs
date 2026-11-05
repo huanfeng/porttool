@@ -54,6 +54,8 @@ fn main() -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     let service = runtime.block_on(Service::start(config, config_path.clone(), |_| {}))?;
+    // 换了安装位置（如 Scoop 升级）时，把自启动注册表路径跟上
+    autostart::refresh();
     gui::run(service.clone(), runtime.handle().clone(), load_error, !args.autostart);
     runtime.block_on(service.shutdown());
     Ok(())
