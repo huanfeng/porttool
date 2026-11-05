@@ -17,6 +17,9 @@ PortTool 把本机串口共享到网络上。通过这个接口可以读取设�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/rules` | 所有转发规则（串口、SSH、TCP）及状态 |
+| POST | `/rules/{name}/enable` | 启动 SSH / TCP 规则 |
+| POST | `/rules/{name}/disable` | 停止 SSH / TCP 规则 |
 | GET | `/ports` | 串口列表和状态 |
 | GET | `/devices` | 本机所有串口设备（用于配置） |
 | GET | `/ports/{name}/tail?lines=200` | 最近 N 行 |

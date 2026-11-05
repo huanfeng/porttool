@@ -3,12 +3,12 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use comhub_core::config::Config;
-use comhub_core::service::Service;
+use porttool_core::config::Config;
+use porttool_core::service::Service;
 
 pub fn print_devices() {
     println!("{:<8} {:<10} {:<20} DESCRIPTION", "COM", "VID:PID", "SERIAL");
-    for d in comhub_core::devices::list_devices() {
+    for d in porttool_core::devices::list_devices() {
         let vid_pid = match (d.vid, d.pid) {
             (Some(v), Some(p)) => format!("{v:04X}:{p:04X}"),
             _ => "-".into(),
@@ -36,17 +36,17 @@ pub fn serve(config: Option<PathBuf>) -> Result<()> {
     let config_path = config.unwrap_or_else(Config::default_path);
     let config = Config::load(&config_path)?;
     tracing::info!("配置文件 {}", config_path.display());
-    if config.ports.is_empty() {
-        tracing::warn!("配置中没有串口，请参考 docs/DESIGN.md 添加 [[port]]；本机串口如下：");
+    if config.serial_rules().next().is_none() {
+        tracing::warn!("配置中没有串口，请在配置中添加 type = \"serial\" 的 [[rule]]；本机串口如下：");
         print_devices();
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let service = Service::start(config, &config_path, |_| {})?;
+        let service = Service::start(config, config_path.clone(), |_| {}).await?;
         tracing::info!("服务已启动，按 Ctrl+C 退出");
         tokio::signal::ctrl_c().await?;
-        service.shutdown();
+        service.shutdown().await;
         Ok(())
     })
 }

@@ -1,213 +1,353 @@
+//! porttool：PortTool 的命令行客户端，通过 HTTP 接口管理转发规则、读取串口日志、向设备发送命令。
+
+mod local;
+
+use std::io::{Read, Write};
+use std::process::ExitCode;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use ureq::http::Response;
+use ureq::{Agent, Body, RequestBuilder};
+
+const AFTER_HELP: &str = "\
+日志行格式：
+  2026-10-23 14:57:01.123 [RX] 设备输出      [TX] 发给设备的数据      [SYS] 服务事件
+
+退出码：0 成功；1 出错；2 参数错误；3 wait/send --expect 超时（期间收到的日志仍会输出）
+
+示例：
+  porttool list                                      查看所有转发规则及状态
+  porttool ports                                     查看串口详情
+  porttool disable dev-proxy                         停止一条 SSH / TCP 规则
+  porttool devices --local                           列出本机串口及 USB 序列号（不需要服务）
+  porttool tail esp32 -n 100                         最近 100 行日志
+  porttool log esp32 --since 1520                    1520 之后的新日志（末行给出下次的 since）
+  porttool grep esp32 \"(?i)error|panic\"              搜索最近的错误
+  porttool send esp32 reboot --expect \"boot done\" --timeout 20
+                                                    重启设备并等待启动完成
+  porttool send esp32 '\\x03' --escape --eol none     发送 Ctrl+C
+  porttool wait esp32 \"connected\" --timeout 60       等待某条日志出现
+  porttool follow esp32                              持续输出（Ctrl+C 结束）";
 
 #[derive(Parser)]
-#[command(name = "porttool", version, about = "多协议端口转发工具")]
+#[command(
+    version,
+    about = "读取 PortTool 共享的串口日志、向设备发送命令",
+    after_help = AFTER_HELP
+)]
 struct Cli {
-    /// 配置文件路径
-    #[arg(long, env = "PORTTOOL_CONFIG")]
-    config: Option<PathBuf>,
-
-    /// HTTP API 认证 token
-    #[arg(long, env = "PORTTOOL_TOKEN")]
+    /// PortTool 服务地址
+    #[arg(long, global = true, env = "PORTTOOL_HOST", default_value = "127.0.0.1:7000")]
+    host: String,
+    /// 访问 token（服务配置了 token 时需要）
+    #[arg(long, global = true, env = "PORTTOOL_TOKEN", hide_env_values = true)]
     token: Option<String>,
-
+    /// 输出 JSON 而不是文本
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
 #[derive(Subcommand)]
-enum Commands {
-    /// 前台运行服务（不启动 GUI）
-    Serve {
-        /// 配置文件路径
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
-
-    /// 列出所有规则及状态
-    List {
-        /// 服务地址
-        #[arg(long, default_value = "http://127.0.0.1:7000")]
-        server: String,
-    },
-
-    /// 启用规则
-    Enable {
-        name: String,
-        /// 服务地址
-        #[arg(long, default_value = "http://127.0.0.1:7000")]
-        server: String,
-    },
-
-    /// 停用规则
-    Disable {
-        name: String,
-        /// 服务地址
-        #[arg(long, default_value = "http://127.0.0.1:7000")]
-        server: String,
-    },
-
-    /// 列出本机串口（不需要服务运行）
+enum Command {
+    /// 列出所有转发规则（串口、SSH、TCP）及状态
+    List,
+    /// 列出串口的详细状态（波特率、端口、客户端、日志序号）
+    Ports,
+    /// 启动 SSH / TCP 规则
+    Enable { name: String },
+    /// 停止 SSH / TCP 规则
+    Disable { name: String },
+    /// 列出服务所在机器的串口设备（COM 号、USB 序列号，用于填写配置）
     Devices {
+        /// 直接枚举本机串口，不经过服务（服务没有运行时也可用）
         #[arg(long)]
         local: bool,
     },
-
-    /// 读取串口日志（需要服务运行）
+    /// 显示最近 N 行日志
     Tail {
         name: String,
-        #[arg(short = 'n', default_value = "100")]
+        #[arg(short = 'n', long, default_value_t = 200)]
         lines: usize,
-        #[arg(short, long)]
-        follow: bool,
-        #[arg(long, default_value = "http://127.0.0.1:7000")]
-        server: String,
     },
-
-    /// 向串口发送数据
+    /// 增量读取：输出 seq 大于 --since 的行，最后一行是 `-- next_seq=<n>`
+    Log {
+        name: String,
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+    },
+    /// 在最近的日志中按正则搜索
+    Grep {
+        name: String,
+        pattern: String,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
+    /// 等待一条匹配的新日志出现，输出等待期间的所有日志
+    Wait {
+        name: String,
+        pattern: String,
+        /// 超时秒数
+        #[arg(long, default_value_t = 30.0, value_parser = parse_timeout)]
+        timeout: f64,
+        /// 让 TX/SYS 行也参与匹配（默认只匹配设备输出 RX）
+        #[arg(long)]
+        any_dir: bool,
+    },
+    /// 持续输出新日志
+    Follow { name: String },
+    /// 向设备发送数据（默认在末尾追加 \r\n）
     Send {
         name: String,
-        data: String,
+        text: String,
+        /// 发送后等待匹配这个正则的日志行，并输出期间的日志
         #[arg(long)]
         expect: Option<String>,
-        #[arg(long, default_value = "10")]
-        timeout: u64,
-        #[arg(long, default_value = "http://127.0.0.1:7000")]
-        server: String,
+        /// 等待 --expect 的超时秒数
+        #[arg(long, default_value_t = 5.0, value_parser = parse_timeout)]
+        timeout: f64,
+        /// 让 TX/SYS 行也参与 --expect 匹配（默认只匹配设备输出 RX）
+        #[arg(long)]
+        any_dir: bool,
+        /// 末尾追加的换行：crlf、cr、lf、none
+        #[arg(long, default_value = "crlf")]
+        eol: String,
+        /// 解析转义：\r \n \t \\ \xNN
+        #[arg(long)]
+        escape: bool,
+    },
+    /// 显示服务端的接口说明
+    Doc,
+    /// 不启动界面，在前台运行串口共享服务（日志输出到控制台，Ctrl+C 退出）
+    Serve {
+        /// 配置文件路径，默认 %APPDATA%\porttool\config.toml
+        #[arg(long, short)]
+        config: Option<std::path::PathBuf>,
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+/// HTTP 请求本身的超时要比等待时间长一些，留出网络往返。
+const REQUEST_SLACK: f64 = 10.0;
 
+fn main() -> ExitCode {
     let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Serve { config } => {
-            let config_path = config
-                .or(cli.config)
-                .unwrap_or_else(|| porttool_core::Config::default_path());
-            serve(config_path).await
-        }
-        Commands::List { server } => {
-            list_rules(&server, cli.token.as_deref()).await
-        }
-        Commands::Enable { name, server } => {
-            enable_rule(&server, &name, cli.token.as_deref()).await
-        }
-        Commands::Disable { name, server } => {
-            disable_rule(&server, &name, cli.token.as_deref()).await
-        }
-        Commands::Devices { local } => {
-            if local {
-                list_local_devices().await
-            } else {
-                anyhow::bail!("请使用 --local 列出本机串口")
-            }
-        }
-        Commands::Tail { name, lines, follow, server } => {
-            if follow {
-                anyhow::bail!("--follow 功能尚未实现")
-            }
-            tail_serial(&server, &name, lines, cli.token.as_deref()).await
-        }
-        Commands::Send { name, data, expect, timeout, server } => {
-            send_serial(&server, &name, &data, expect.as_deref(), timeout, cli.token.as_deref()).await
-        }
-    }
-}
-
-async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
-    println!("PortTool 服务启动中...");
-    println!("配置文件: {}", config_path.display());
-
-    let config = porttool_core::Config::load(&config_path)?;
-    let service = porttool_core::Service::start(config.clone(), config_path, |_| {}).await?;
-
-    println!("✓ 服务已启动");
-    println!("  HTTP API: http://{}:{}", config.server.bind, config.server.http_port);
-    println!("  配置规则: {} 条", config.rules.len());
-    println!("\n按 Ctrl+C 退出");
-
-    tokio::signal::ctrl_c().await?;
-    println!("\n正在关闭服务...");
-    service.shutdown().await;
-    println!("服务已停止");
-    Ok(())
-}
-
-async fn list_rules(server: &str, token: Option<&str>) -> anyhow::Result<()> {
-    println!("正在连接服务: {}", server);
-    println!("\n提示: 该功能需要 HTTP API 实现（Phase 5）");
-    Ok(())
-}
-
-async fn enable_rule(server: &str, name: &str, token: Option<&str>) -> anyhow::Result<()> {
-    println!("启用规则: {}", name);
-    println!("\n提示: 该功能需要 HTTP API 实现（Phase 5）");
-    Ok(())
-}
-
-async fn disable_rule(server: &str, name: &str, token: Option<&str>) -> anyhow::Result<()> {
-    println!("停用规则: {}", name);
-    println!("\n提示: 该功能需要 HTTP API 实现（Phase 5）");
-    Ok(())
-}
-
-async fn list_local_devices() -> anyhow::Result<()> {
-    println!("扫描本机串口...\n");
-
-    match serialport::available_ports() {
-        Ok(ports) => {
-            if ports.is_empty() {
-                println!("未找到串口设备");
-            } else {
-                println!("发现 {} 个串口:\n", ports.len());
-                for port in ports {
-                    println!("  {}", port.port_name);
-                    if let serialport::SerialPortType::UsbPort(info) = &port.port_type {
-                        if let Some(serial) = &info.serial_number {
-                            println!("    USB 序列号: {}", serial);
-                        }
-                        if let Some(product) = &info.product {
-                            println!("    产品: {}", product);
-                        }
-                        if let Some(manufacturer) = &info.manufacturer {
-                            println!("    制造商: {}", manufacturer);
-                        }
-                    }
-                    println!();
-                }
-            }
-        }
+    match run(cli) {
+        Ok(code) => code,
         Err(e) => {
-            anyhow::bail!("枚举串口失败: {}", e);
+            eprintln!("porttool: {e:#}");
+            ExitCode::from(1)
         }
     }
-    Ok(())
 }
 
-async fn tail_serial(server: &str, name: &str, lines: usize, token: Option<&str>) -> anyhow::Result<()> {
-    println!("读取串口日志: {} (最后 {} 行)", name, lines);
-    println!("\n提示: 该功能需要 HTTP API 实现（Phase 5）");
-    Ok(())
-}
-
-async fn send_serial(
-    server: &str,
-    name: &str,
-    data: &str,
-    expect: Option<&str>,
-    timeout: u64,
-    token: Option<&str>,
-) -> anyhow::Result<()> {
-    println!("向串口发送数据: {}", name);
-    println!("  数据: {}", data);
-    if let Some(pattern) = expect {
-        println!("  等待响应: {} (超时 {}s)", pattern, timeout);
+fn run(cli: Cli) -> Result<ExitCode> {
+    let client = Client::new(&cli);
+    match cli.command {
+        Command::List => client.print(client.get("/rules", None)),
+        Command::Ports => client.print(client.get("/ports", None)),
+        Command::Enable { name } => client.finish(client.post(&format!("/rules/{name}/enable"), None).send_empty()),
+        Command::Disable { name } => client.finish(client.post(&format!("/rules/{name}/disable"), None).send_empty()),
+        Command::Devices { local: true } => {
+            local::print_devices();
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Devices { local: false } => client.print(client.get("/devices", None)),
+        Command::Serve { config } => {
+            local::serve(config)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Doc => client.print(client.get("/", None)),
+        Command::Tail { name, lines } => client.print(
+            client
+                .get(&port_path(&name, "tail"), None)
+                .query("lines", lines.to_string()),
+        ),
+        Command::Log { name, since, limit } => client.print(
+            client
+                .get(&port_path(&name, "log"), None)
+                .query("since", since.to_string())
+                .query("limit", limit.to_string()),
+        ),
+        Command::Grep { name, pattern, limit } => client.print(
+            client
+                .get(&port_path(&name, "grep"), None)
+                .query("pattern", pattern)
+                .query("limit", limit.to_string()),
+        ),
+        Command::Wait { name, pattern, timeout, any_dir } => client.print(
+            client
+                .get(&port_path(&name, "wait"), Some(timeout + REQUEST_SLACK))
+                .query("pattern", pattern)
+                .query("timeout", timeout.to_string())
+                .query("dir", dir_param(any_dir)),
+        ),
+        Command::Follow { name } => client.follow(&name),
+        Command::Send { name, text, expect, timeout, eol, escape, any_dir } => {
+            let data = if escape { unescape(&text)? } else { text.into_bytes() };
+            let mut request = client
+                .post(&port_path(&name, "send"), Some(timeout + REQUEST_SLACK))
+                .query("eol", eol);
+            if let Some(expect) = expect {
+                request = request
+                    .query("expect", expect)
+                    .query("timeout", timeout.to_string())
+                    .query("dir", dir_param(any_dir));
+            }
+            client.finish(request.send(&data[..]))
+        }
     }
-    println!("\n提示: 该功能需要 HTTP API 实现（Phase 5）");
-    Ok(())
+}
+
+fn dir_param(any_dir: bool) -> &'static str {
+    if any_dir {
+        "any"
+    } else {
+        "rx"
+    }
+}
+
+/// 超时秒数：有限的非负数，上限交给服务端。
+fn parse_timeout(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(t) if t.is_finite() && t >= 0.0 => Ok(t),
+        _ => Err(format!("`{s}` 不是有效的秒数")),
+    }
+}
+
+fn port_path(name: &str, action: &str) -> String {
+    format!("/ports/{name}/{action}")
+}
+
+struct Client {
+    agent: Agent,
+    base: String,
+    token: Option<String>,
+    json: bool,
+}
+
+impl Client {
+    fn new(cli: &Cli) -> Self {
+        let agent = Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .build()
+            .into();
+        let base = if cli.host.starts_with("http://") || cli.host.starts_with("https://") {
+            cli.host.trim_end_matches('/').to_string()
+        } else {
+            format!("http://{}", cli.host.trim_end_matches('/'))
+        };
+        Self { agent, base, token: cli.token.clone(), json: cli.json }
+    }
+
+    fn get(&self, path: &str, timeout: Option<f64>) -> RequestBuilder<ureq::typestate::WithoutBody> {
+        let mut request = self.agent.get(format!("{}{path}", self.base));
+        request = request.config().timeout_global(timeout.map(Duration::from_secs_f64)).build();
+        self.decorate(request)
+    }
+
+    fn post(&self, path: &str, timeout: Option<f64>) -> RequestBuilder<ureq::typestate::WithBody> {
+        let mut request = self.agent.post(format!("{}{path}", self.base));
+        request = request.config().timeout_global(timeout.map(Duration::from_secs_f64)).build();
+        self.decorate(request)
+    }
+
+    fn decorate<B>(&self, mut request: RequestBuilder<B>) -> RequestBuilder<B> {
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        if self.json {
+            request = request.query("format", "json");
+        }
+        request
+    }
+
+    fn print(&self, request: RequestBuilder<ureq::typestate::WithoutBody>) -> Result<ExitCode> {
+        self.finish(request.call())
+    }
+
+    /// 输出响应体，并把 HTTP 状态映射成退出码。
+    fn finish(&self, response: Result<Response<Body>, ureq::Error>) -> Result<ExitCode> {
+        let mut response = response.with_context(|| format!("无法连接 PortTool 服务 {}", self.base))?;
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string()?;
+        match status {
+            200..=299 => {
+                print!("{body}");
+                Ok(ExitCode::SUCCESS)
+            }
+            408 => {
+                print!("{body}");
+                Ok(ExitCode::from(3))
+            }
+            _ => bail!("HTTP {status}: {}", body.trim_end().trim_start_matches("错误: ")),
+        }
+    }
+
+    fn follow(&self, name: &str) -> Result<ExitCode> {
+        let response = self
+            .get(&port_path(name, "stream"), None)
+            .call()
+            .with_context(|| format!("无法连接 PortTool 服务 {}", self.base))?;
+        if !response.status().is_success() {
+            return self.finish(Ok(response));
+        }
+        let mut reader = response.into_body().into_reader();
+        let mut stdout = std::io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                return Ok(ExitCode::SUCCESS);
+            }
+            stdout.write_all(&buf[..n])?;
+            stdout.flush()?;
+        }
+    }
+}
+
+/// 解析 `\r \n \t \\ \xNN` 转义。
+fn unescape(text: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('r') => out.push(b'\r'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('\\') => out.push(b'\\'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                let byte = u8::from_str_radix(&hex, 16)
+                    .with_context(|| format!("无效的转义 \\x{hex}"))?;
+                out.push(byte);
+            }
+            Some(other) => bail!("不支持的转义 \\{other}"),
+            None => bail!("末尾多了一个 \\"),
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unescape_sequences() {
+        assert_eq!(unescape(r"a\r\n\t\\\x03中").unwrap(), b"a\r\n\t\\\x03\xE4\xB8\xAD");
+        assert!(unescape(r"\xZZ").is_err());
+        assert!(unescape(r"\q").is_err());
+        assert!(unescape("\\").is_err());
+    }
 }

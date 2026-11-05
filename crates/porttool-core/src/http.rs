@@ -19,6 +19,7 @@ use tokio::sync::oneshot;
 
 use crate::buffer::{Direction, LogLine};
 use crate::devices;
+use crate::forwarding::ForwardStatus;
 use crate::port::{PortHub, PortSnapshot, PortState};
 use crate::service::Service;
 
@@ -32,6 +33,9 @@ const MAX_WAIT_LINES: usize = 5000;
 pub fn router(service: Arc<Service>) -> Router {
     Router::new()
         .route("/", get(usage))
+        .route("/rules", get(list_rules))
+        .route("/rules/{name}/enable", post(enable_rule))
+        .route("/rules/{name}/disable", post(disable_rule))
         .route("/ports", get(list_ports))
         .route("/devices", get(list_devices))
         .route("/ports/{name}/tail", get(tail))
@@ -255,6 +259,43 @@ async fn usage(State(service): State<Arc<Service>>, headers: HeaderMap) -> Respo
     let mut doc = USAGE.replace("{base}", &format!("http://{host}"));
     let _ = write!(doc, "\n## 当前串口\n\n```\n{}```\n", ports_table(&service.snapshots()));
     ([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], doc).into_response()
+}
+
+fn rules_table(rules: &[ForwardStatus]) -> String {
+    let mut out = format!("{:<16} {:<7} {:<9} {:>7}  {}\n", "NAME", "TYPE", "STATE", "CLIENTS", "DETAIL");
+    for r in rules {
+        let ty = format!("{:?}", r.rule_type).to_lowercase();
+        let state = format!("{:?}", r.state).to_lowercase();
+        let detail = r.detail.replace('\n', " | ");
+        let _ = writeln!(out, "{:<16} {:<7} {:<9} {:>7}  {}", r.name, ty, state, r.clients, detail);
+    }
+    out
+}
+
+/// 所有转发规则（串口、SSH、TCP）及状态
+async fn list_rules(State(service): State<Arc<Service>>, Query(params): Query<Params>) -> Response {
+    let rules = service.list_rules().await;
+    if params.json() {
+        json(&rules)
+    } else {
+        text(rules_table(&rules))
+    }
+}
+
+async fn enable_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
+    service
+        .enable_rule(&name)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(text(format!("规则 {name} 已启动\n")))
+}
+
+async fn disable_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
+    service
+        .disable_rule(&name)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(text(format!("规则 {name} 已停止\n")))
 }
 
 async fn list_ports(State(service): State<Arc<Service>>, Query(params): Query<Params>) -> Response {
@@ -536,5 +577,55 @@ mod tests {
         for bad in ["", "evil.com", "evil.com:7000", "127.0.0.1.nip.io", "[evil]:7000"] {
             assert!(!is_allowed_host(bad), "{bad}");
         }
+    }
+
+    async fn request(port: u16, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        stream.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rules_endpoints_list_enable_disable() {
+        use crate::config::{Config, ForwardRule, ServerConfig, TcpRule};
+        let free = || {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let http_port = free();
+        let listen = format!("127.0.0.1:{}", free());
+        let config = Config {
+            server: ServerConfig { bind: "127.0.0.1".into(), http_port, ..ServerConfig::default() },
+            rules: vec![ForwardRule::Tcp(TcpRule {
+                name: "web".into(),
+                listen,
+                target: "127.0.0.1:9".into(),
+                max_connections: 10,
+                enabled: true,
+            })],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::start(config, dir.path().join("c.toml"), |_| {}).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let list = request(http_port, "GET", "/rules").await;
+        assert!(list.contains("200 OK") && list.contains("web") && list.contains("running"), "{list}");
+        let json = request(http_port, "GET", "/rules?format=json").await;
+        assert!(json.contains("\"rule_type\":\"tcp\""), "{json}");
+
+        let off = request(http_port, "POST", "/rules/web/disable").await;
+        assert!(off.contains("200 OK"), "{off}");
+        assert!(request(http_port, "GET", "/rules").await.contains("stopped"));
+        let on = request(http_port, "POST", "/rules/web/enable").await;
+        assert!(on.contains("200 OK"), "{on}");
+        let missing = request(http_port, "POST", "/rules/nope/enable").await;
+        assert!(missing.contains("400"), "{missing}");
+        service.shutdown().await;
     }
 }
