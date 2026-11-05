@@ -188,6 +188,8 @@ impl Forwarder for TcpForwarder {
         let mut task = self.task.lock().await;
         if let Some(handle) = task.take() {
             handle.abort();
+            // 等任务真正结束（监听套接字随之释放），否则紧接着重新启动同一端口可能绑定失败
+            let _ = handle.await;
             self.update_state(State::Stopped, "已停止".into()).await;
         }
         Ok(())
