@@ -15,3 +15,6 @@ windui = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+[dev-dependencies]
+tempfile = "3"
