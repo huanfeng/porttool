@@ -206,6 +206,14 @@ fn default_localhost() -> String {
 }
 
 impl Config {
+    /// 所有串口规则（含已停用的）
+    pub fn serial_rules(&self) -> impl Iterator<Item = &SerialRule> {
+        self.rules.iter().filter_map(|r| match r {
+            ForwardRule::Serial(s) => Some(s),
+            _ => None,
+        })
+    }
+
     /// 跨平台默认配置路径
     pub fn default_path() -> PathBuf {
         dirs::config_dir()

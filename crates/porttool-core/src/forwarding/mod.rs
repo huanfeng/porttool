@@ -2,7 +2,6 @@
 
 pub mod ssh;
 pub mod tcp;
-pub mod serial;
 
 use async_trait::async_trait;
 

@@ -15,7 +15,7 @@ use serialport::SerialPort;
 use tokio::sync::{broadcast, watch};
 
 use crate::buffer::{Direction, LogBuffer, LogLine};
-use crate::config::{PortConfig, TerminalMode};
+use crate::config::{SerialRule, TerminalMode};
 use crate::devices::{self, find_device};
 use crate::logfile::LogFile;
 use crate::text::{render_line, LineSplitter, SplitMode};
@@ -65,7 +65,7 @@ pub struct PortSnapshot {
 }
 
 pub struct PortHub {
-    config: PortConfig,
+    config: SerialRule,
     state: Mutex<PortState>,
     buffer: Arc<Mutex<LogBuffer>>,
     term_tx: broadcast::Sender<TermEvent>,
@@ -93,7 +93,7 @@ pub struct Handover {
 impl PortHub {
     /// 创建并启动 IO 线程。`on_change` 在状态或客户端数量变化时调用，参数是串口别名。
     pub fn start(
-        config: PortConfig,
+        config: SerialRule,
         buffer_lines: usize,
         log_root: &Path,
         handover: Handover,
@@ -164,7 +164,7 @@ impl PortHub {
         self.buffer.clone()
     }
 
-    pub fn config(&self) -> &PortConfig {
+    pub fn config(&self) -> &SerialRule {
         &self.config
     }
 

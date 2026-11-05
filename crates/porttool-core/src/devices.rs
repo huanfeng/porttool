@@ -3,7 +3,7 @@
 use serde::Serialize;
 use serialport::SerialPortType;
 
-use crate::config::PortConfig;
+use crate::config::SerialRule;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceInfo {
@@ -54,7 +54,7 @@ pub fn list_devices() -> Vec<DeviceInfo> {
 }
 
 /// 在设备列表中查找配置对应的设备：配置了序列号就只按序列号匹配，否则按 COM 号匹配。
-pub fn find_device<'a>(config: &PortConfig, devices: &'a [DeviceInfo]) -> Option<&'a DeviceInfo> {
+pub fn find_device<'a>(config: &SerialRule, devices: &'a [DeviceInfo]) -> Option<&'a DeviceInfo> {
     if let Some(sn) = &config.serial_number {
         return devices
             .iter()
@@ -92,8 +92,8 @@ mod tests {
         }
     }
 
-    fn config(sn: Option<&str>, com: Option<&str>) -> PortConfig {
-        PortConfig {
+    fn config(sn: Option<&str>, com: Option<&str>) -> SerialRule {
+        SerialRule {
             name: "x".into(),
             serial_number: sn.map(Into::into),
             com: com.map(Into::into),

@@ -124,7 +124,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     println!("配置文件: {}", config_path.display());
 
     let config = porttool_core::Config::load(&config_path)?;
-    let service = porttool_core::Service::start(config.clone(), config_path).await?;
+    let service = porttool_core::Service::start(config.clone(), config_path, |_| {}).await?;
 
     println!("✓ 服务已启动");
     println!("  HTTP API: http://{}:{}", config.server.bind, config.server.http_port);
