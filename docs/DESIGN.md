@@ -110,7 +110,8 @@ max_connections = 1000
 ```
 
 串口匹配规则：配置了 `serial_number` 就只按序列号匹配；否则按 `com` 匹配。
-校验：名称合法且唯一；串口 `tcp_port` 不与 HTTP 端口或其它串口冲突；
+校验：名称合法且唯一；本机监听端点不能冲突——HTTP、串口终端（跟随 `server.bind`）、SSH 本地转发（`127.0.0.1`）、TCP `listen`
+同端口且地址重叠（相同，或同一地址族的通配地址）时报错并指出冲突双方，SSH 远程转发（-R）的端口在服务器侧不算，已停用的规则不占端口；
 SSH 的目标 / 私钥路径 / 远端主机不能以 `-` 开头或带空白（会原样传给 ssh 命令行）；
 TCP 的监听和目标必须是 `IP:端口`。
 
@@ -148,7 +149,7 @@ TCP 的监听和目标必须是 `IP:端口`。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 使用说明（Markdown），给 AI 读 |
-| GET | `/rules` | 所有规则（串口、SSH、TCP）及状态 |
+| GET | `/rules` | 所有规则（串口、SSH、TCP，含已停用的）及状态；JSON 带 `endpoint`（串口当前 COM 号）与 `attempt`（SSH 第几次重连） |
 | POST | `/rules/{name}/enable` `/disable` | 启用 / 停用规则（串口、SSH、TCP 都适用，持久化到配置） |
 | GET | `/ports` | 串口详情：别名、状态、TCP 端口、客户端数量、最新 seq |
 | GET | `/devices` | 本机串口设备 |

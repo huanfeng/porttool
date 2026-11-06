@@ -17,7 +17,7 @@ PortTool 把本机串口共享到网络上。通过这个接口可以读取设�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/rules` | 所有转发规则（串口、SSH、TCP）及状态 |
+| GET | `/rules` | 所有转发规则（串口、SSH、TCP，含已停用的）及状态 |
 | POST | `/rules/{name}/enable` | 启用规则（串口、SSH、TCP 都适用，同时写入配置文件） |
 | POST | `/rules/{name}/disable` | 停用规则（同时写入配置文件，重启后保持停用） |
 | GET | `/ports` | 串口列表和状态 |

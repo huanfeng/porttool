@@ -1020,7 +1020,7 @@ mod tests {
         assert!(port_hint(any, &port.to_string(), None).contains("占用"));
         assert!(port_hint(any, &port.to_string(), Some(port)).is_empty(), "未修改的端口不检查");
         drop(l);
-        assert!(port_hint(any, &port.to_string(), None).contains("可用"));
+        assert!(eventually(|| port_hint(any, &port.to_string(), None).contains("可用")));
         assert!(port_hint(any, "x", None).contains("整数"));
     }
 
@@ -1039,7 +1039,7 @@ mod tests {
         assert_ne!(found, port, "被占用的候选应被跳过");
         assert!(found > port - 1);
         drop(l);
-        assert_eq!(first_free_port("127.0.0.1", &[port - 1]), Some(port), "释放后又可用");
+        assert!(eventually(|| first_free_port("127.0.0.1", &[port - 1]) == Some(port)), "释放后又可用");
     }
 
     #[test]
@@ -1050,7 +1050,7 @@ mod tests {
         assert_ne!(first_free_port_from("127.0.0.1", port, &[]), Some(port));
         // 配置里别的规则（可能没在运行，绑不出占用）用着的端口也要跳过
         drop(l);
-        assert_eq!(first_free_port_from("127.0.0.1", port, &[]), Some(port));
+        assert!(eventually(|| first_free_port_from("127.0.0.1", port, &[]) == Some(port)));
         assert_ne!(first_free_port_from("127.0.0.1", port, &[port]), Some(port));
     }
 
@@ -1063,6 +1063,16 @@ mod tests {
         assert!(listen_hint(&addr, None).contains("占用"));
         assert!(listen_hint(&addr, Some(&addr)).is_empty(), "地址没改不检查");
         drop(l);
-        assert!(listen_hint(&addr, None).contains("可用"));
+        assert!(eventually(|| listen_hint(&addr, None).contains("可用")));
+    }
+
+    /// 刚释放的端口可能恰好被并行的其它测试占着（它们也在绑临时端口），稍等重试。
+    fn eventually(mut check: impl FnMut() -> bool) -> bool {
+        (0..25).any(|_| {
+            check() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        })
     }
 }
