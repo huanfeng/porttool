@@ -12,42 +12,79 @@ use crate::gui::ui::{kind_badge, mono, page_header, panel, status_pill, tone_rol
 use crate::gui::Gui;
 
 // 各列宽度：表头与数据行共用。权重列按比例分剩余宽度，固定列给定宽。
-const W_PATH: f32 = 5.0;
 const W_ACTIVITY: f32 = 1.2;
 const W_STATUS: i32 = 128;
 const W_OPS: i32 = 104;
 const ROW_H: i32 = 44;
 
-/// 名称列的宽度权重：概览页的名称前面还有类型徽章，要宽一些。表头与数据行必须一致。
-fn name_weight(show_kind: bool) -> f32 {
-    if show_kind {
-        2.3
-    } else {
-        1.5
+/// 路径区里一格显示 `RuleRow` 的什么：整串路径，或路径的第几段。
+#[derive(Clone, Copy)]
+enum Field {
+    Path,
+    Part(usize),
+}
+
+impl Field {
+    fn of(self, r: &RuleRow) -> &str {
+        match self {
+            Field::Path => &r.path,
+            Field::Part(i) => r.parts.get(i).map(String::as_str).unwrap_or(""),
+        }
     }
 }
 
-/// 列表顶部的列标题；`path_title` 随类型变（串口 / SSH / TCP 的路径含义不同）。
-pub fn header(path_title: &str, show_kind: bool) -> Element {
+/// 列表的列：`kind` 为 `None` 是概览（混合类型，一整列路径）；类型页按语义分列，每格各自截断，
+/// 列标题就是说明，不再需要箭头。返回（路径区的列：标题、字段、宽度权重；是否有「连接 / 流量」列）。
+/// SSH 没有连接数和流量数据，那一列不要，把宽度让给路径。
+fn columns(kind: Option<Kind>) -> (&'static [(&'static str, Field, f32)], bool) {
+    match kind {
+        None => (&[("路径", Field::Path, 5.0)], true),
+        Some(Kind::Serial) => (&[("本机串口", Field::Part(0), 2.5), ("终端连接", Field::Part(1), 2.5)], true),
+        Some(Kind::Ssh) => (
+            &[("本机监听", Field::Part(0), 2.2), ("SSH 服务器", Field::Part(1), 2.5), ("目标", Field::Part(2), 2.6)],
+            false,
+        ),
+        Some(Kind::Tcp) => (&[("本机监听", Field::Part(0), 2.5), ("目标", Field::Part(1), 2.5)], true),
+    }
+}
+
+/// 名称列的宽度权重：概览页的名称前面还有类型徽章，要宽一些。表头与数据行必须一致。
+fn name_weight(kind: Option<Kind>) -> f32 {
+    match kind {
+        None => 2.3,
+        // SSH 的名称前面还有 -L / -R 标签，而且没有「连接 / 流量」列，宽度够
+        Some(Kind::Ssh) => 2.0,
+        Some(_) => 1.5,
+    }
+}
+
+/// 列表顶部的列标题（只出现一次）。
+pub fn header(kind: Option<Kind>) -> Element {
     let cell = |text: &str| Element::label(text.to_string()).fg_role(Role::TextMuted);
-    Element::row()
+    let (cols, activity) = columns(kind);
+    let mut row = Element::row()
         .width_match()
         .bg_role(Role::SurfaceAlt)
         .padding_xy(16, 8)
         .spacing(12)
-        .child(cell("名称").weight(name_weight(show_kind)))
-        .child(cell(path_title).weight(W_PATH))
-        .child(cell("状态").width(W_STATUS))
-        .child(cell("连接 / 流量").weight(W_ACTIVITY))
-        .child(cell("操作").width(W_OPS).text_align(Align::End))
+        .child(cell("名称").weight(name_weight(kind)));
+    for (title, _, weight) in cols {
+        row = row.child(cell(title).weight(*weight));
+    }
+    row = row.child(cell("状态").width(W_STATUS));
+    if activity {
+        row = row.child(cell("连接 / 流量").weight(W_ACTIVITY));
+    }
+    row.child(cell("操作").width(W_OPS).text_align(Align::End))
 }
 
-/// 一条规则。`show_kind` 为真时名称前面带类型徽章（概览页里要区分类型）。
-pub fn rule_row(gui: &Gui, r: RuleRow, show_kind: bool) -> Element {
+/// 一条规则。`kind` 为 `None`（概览页）时名称前面带类型徽章，用来区分类型。
+pub fn rule_row(gui: &Gui, r: RuleRow, kind: Option<Kind>) -> Element {
     let metrics = gui.metric_signals(&r.name);
+    let (cols, activity) = columns(kind);
 
-    let mut name = Element::hstack().weight(name_weight(show_kind)).cross(Align::Center).spacing(8);
-    if show_kind {
+    let mut name = Element::hstack().weight(name_weight(kind)).cross(Align::Center).spacing(8);
+    if kind.is_none() {
         name = name.child(kind_badge(r.kind));
     }
     // SSH 的方向标签放在名称前面，和名称挨着；名称标签占徽章之外的剩余宽度，
@@ -63,39 +100,44 @@ pub fn rule_row(gui: &Gui, r: RuleRow, show_kind: bool) -> Element {
             .weight(1.0),
     );
 
-    let main = Element::row()
+    let mut main = Element::row()
         .width_match()
         .height(ROW_H)
         .cross(Align::Center)
         .padding_xy(16, 0)
         .spacing(12)
-        .child(name)
-        .child(
-            mono(r.path.clone())
+        .child(name);
+    for (_, field, weight) in cols {
+        let text = field.of(&r).to_string();
+        main = main.child(
+            mono(text.clone())
                 .max_lines(1)
-                // 超长时保留开头的监听地址和结尾的目标，省略中间；完整路径在 tooltip 里
+                // 超长时保留开头和结尾（地址的开头、端口），省略中间；完整内容在 tooltip 里
                 .truncate(Truncate::Middle)
-                .tooltip(r.path.clone())
-                .weight(W_PATH),
-        )
-        .child(
-            Element::hstack()
-                .width(W_STATUS)
-                .child(status_pill(&r.status, r.tone).tooltip(r.detail.clone())),
-        )
-        .child(
+                .tooltip(text)
+                .weight(*weight),
+        );
+    }
+    main = main.child(
+        Element::hstack()
+            .width(W_STATUS)
+            .child(status_pill(&r.status, r.tone).tooltip(r.detail.clone())),
+    );
+    if activity {
+        main = main.child(
             Element::label(metrics.activity)
                 .fg_role(Role::TextMuted)
                 .max_lines(1)
                 .truncate(Truncate::End)
                 .weight(W_ACTIVITY),
-        )
-        .child(
-            Element::hstack()
-                .width(W_OPS)
-                .child(Element::flex_spacer())
-                .child(row_actions(gui, &r)),
         );
+    }
+    let main = main.child(
+        Element::hstack()
+            .width(W_OPS)
+            .child(Element::flex_spacer())
+            .child(row_actions(gui, &r)),
+    );
 
     let mut body = Element::col().width_match().child(main);
     if let Some(notice) = model::notice(&r) {
@@ -140,13 +182,14 @@ fn notice_line(gui: &Gui, r: &RuleRow, notice: model::Notice) -> Element {
 }
 
 /// 带滚动的规则行列表，数据来自一个行信号（按规则名做 keyed diff，没变的行不重建）。
-pub fn rule_list(gui: &Gui, rows: Signal<Vec<RuleRow>>, show_kind: bool) -> Element {
+pub fn rule_list(gui: &Gui, rows: Signal<Vec<RuleRow>>, kind: Option<Kind>) -> Element {
     let g = gui.clone();
-    Element::list_signal(rows, |r: &RuleRow| r.name.clone(), move |r: RuleRow| rule_row(&g, r, show_kind))
+    Element::list_signal(rows, |r: &RuleRow| r.name.clone(), move |r: RuleRow| rule_row(&g, r, kind))
         .weight(1.0)
 }
 
-/// 列表顶部的工具栏：搜索、（概览页）类型筛选、状态筛选、异常优先、批量菜单，右侧是统计文字。
+/// 列表顶部的工具栏：搜索、（概览页）类型筛选、状态筛选、「选项」菜单（异常优先、批量启停），
+/// 类型页右侧是统计文字（概览页上方的统计卡片已经有了）。
 /// `view` 是这个列表在 `Gui::views` 里的下标；每个页面的输入互相独立。
 pub fn toolbar(gui: &Gui, view: usize) -> Element {
     let state = gui.views[view];
@@ -155,49 +198,50 @@ pub fn toolbar(gui: &Gui, view: usize) -> Element {
         .spacing(12)
         .run_spacing(8)
         .weight(1.0)
-        .child(Element::text_input(state.query, "搜索名称、端口、状态").leading_icon('\u{1F50D}').width(190));
+        .child(Element::text_input(state.query, "搜索名称、端口、状态").leading_icon('\u{1F50D}').width(180));
     if view == 0 {
         controls = controls.child(Element::segmented(vec!["全部", "串口", "SSH", "TCP"], state.kind));
     }
     controls = controls
         .child(Element::segmented(vec!["全部", "异常", "已停用"], state.status))
-        .child(Element::checkbox("异常优先", state.problems_first))
-        .child(batch_button(gui, view));
-    Element::row()
+        .child(options_menu(gui, view));
+    let mut bar = Element::row()
         .width_match()
         .cross(Align::Center)
         .padding(12)
         .spacing(12)
-        .child(controls)
-        .child(Element::label_signal(state.summary).fg_role(Role::TextMuted))
+        .child(controls);
+    if view != 0 {
+        bar = bar.child(Element::label_signal(state.summary).fg_role(Role::TextMuted));
+    }
+    bar
 }
 
-/// 「批量 ▾」：全部启用 / 全部停用（一次写配置、一次重载）。
-fn batch_button(gui: &Gui, view: usize) -> Element {
-    let gui = gui.clone();
-    Element::button("批量 ▾").small().outline().neutral().on_click(move |ctx| {
-        // 点开菜单时才取目标：概览页是此刻筛选出来的规则
-        let names = gui.batch_targets(view);
-        let n = names.len();
-        let item = |label: String, enabled: bool| {
-            let (gui, names) = (gui.clone(), names.clone());
-            MenuItem::run(
-                label,
-                move |ctx| match gui.set_enabled_many(&names, enabled) {
-                    Ok(0) => ctx.toast("没有需要改动的规则"),
-                    Ok(changed) => ctx.toast_ok(format!("已{} {changed} 条规则", if enabled { "启用" } else { "停用" })),
-                    Err(e) => ctx.toast_err(e),
-                },
-                false,
-            )
-        };
-        let mut req = MenuRequest::below(
-            ctx.bounds(),
-            vec![item(format!("全部启用（{n} 条）"), true), item(format!("全部停用（{n} 条）"), false)],
-        );
-        req.click_through = false;
-        ctx.show_menu_request(req);
-    })
+/// 「选项 ▾」：异常优先排序开关，以及全部启用 / 全部停用（一次写配置、一次重载）。
+fn options_menu(gui: &Gui, view: usize) -> Element {
+    let state = gui.views[view];
+    // 批量启停的目标在点击时才取：概览页是此刻筛选出来的规则
+    let batch = |label: &'static str, enabled: bool| {
+        let gui = gui.clone();
+        CheckMenuItem::action(label, move |ctx| {
+            let names = gui.batch_targets(view);
+            match gui.set_enabled_many(&names, enabled) {
+                Ok(0) => ctx.toast("没有需要改动的规则"),
+                Ok(changed) => ctx.toast_ok(format!("已{} {changed} 条规则", if enabled { "启用" } else { "停用" })),
+                Err(e) => ctx.toast_err(e),
+            }
+        })
+    };
+    Element::check_menu(
+        "选项",
+        vec![
+            CheckMenuItem::check("异常优先", state.problems_first),
+            CheckMenuItem::separator(),
+            batch("全部启用", true),
+            batch("全部停用", false),
+        ],
+    )
+    .width(110)
 }
 
 /// 列表为空时的提示：一条规则都没有时给出添加入口，有规则但被筛选为空时说明没有匹配。
@@ -227,13 +271,12 @@ pub fn empty_state(gui: &Gui, view: usize, hint: &str, add: Element) -> Element 
 
 /// 串口 / SSH / TCP 页：页头 + 一张带工具栏的规则表。
 pub fn type_page(gui: &Gui, kind: Kind) -> Element {
-    let (view, title, subtitle, add_label, path_title, empty) = match kind {
+    let (view, title, subtitle, add_label, empty) = match kind {
         Kind::Serial => (
             1,
             "串口共享",
             "把本机串口通过 TCP 共享给局域网内的终端",
             "＋ 添加串口",
-            "本机串口 → 终端连接",
             "还没有共享的串口。",
         ),
         Kind::Ssh => (
@@ -241,7 +284,6 @@ pub fn type_page(gui: &Gui, kind: Kind) -> Element {
             "SSH 转发",
             "通过 SSH 服务器建立本地或远程端口转发（调用系统 ssh）",
             "＋ 添加转发",
-            "本机监听 → 服务器 → 目标",
             "还没有 SSH 转发（系统需要已安装 OpenSSH 客户端）。",
         ),
         Kind::Tcp => (
@@ -249,7 +291,6 @@ pub fn type_page(gui: &Gui, kind: Kind) -> Element {
             "TCP 转发",
             "把本机端口的流量转发到另一个地址",
             "＋ 添加转发",
-            "本机监听 → 目标",
             "还没有 TCP 转发。",
         ),
     };
@@ -265,9 +306,9 @@ pub fn type_page(gui: &Gui, kind: Kind) -> Element {
                 .width_match()
                 .height_match()
                 .child(toolbar(gui, view))
-                .child(header(path_title, false))
+                .child(header(Some(kind)))
                 .child(empty_state(gui, view, empty, add_inline))
-                .child(rule_list(gui, gui.views[view].shown, false)),
+                .child(rule_list(gui, gui.views[view].shown, Some(kind))),
         )
         .weight(1.0),
     )

@@ -116,14 +116,14 @@ fn table(gui: &Gui) -> Element {
             .width_match()
             .height_match()
             .child(list::toolbar(gui, 0))
-            .child(list::header("路径", true))
+            .child(list::header(None))
             .child(list::empty_state(
                 gui,
                 0,
                 "还没有任何转发规则。",
                 super::new_button(gui, "＋ 新建"),
             ))
-            .child(list::rule_list(gui, gui.views[0].shown, true)),
+            .child(list::rule_list(gui, gui.views[0].shown, None)),
     )
     .weight(1.0)
 }

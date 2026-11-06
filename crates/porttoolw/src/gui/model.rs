@@ -37,8 +37,10 @@ pub enum Tone {
 pub struct RuleRow {
     pub kind: Kind,
     pub name: String,
-    /// 路径，等宽字体单行显示，例如 `COM5 · 1500000 → telnet :7001`
+    /// 路径，等宽字体单行显示，例如 `COM5 · 1500000 → telnet :7001`；由 `parts` 用 ` → ` 拼成
     pub path: String,
+    /// 路径的各段：类型页把每一段放进单独的列（串口 2 段、SSH 3 段、TCP 2 段），各自截断
+    pub parts: Vec<String>,
     /// 次要参数，例如 `telnet · utf-8`；不单独显示，只参与搜索
     pub sub: String,
     pub status: String,
@@ -147,11 +149,11 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                     // 已连接时显示实际的 COM 号（序列号绑定的设备 COM 号可能变化）
                     let com = status.and_then(|s| s.endpoint.clone()).unwrap_or(target);
                     RuleRow {
-                        kind: Kind::Serial,
-                        name: r.name.clone(),
-                        path: format!("{com} · {} → {} :{}", r.baud, mode_name(r.mode), r.tcp_port),
                         sub: format!("{} · {}", mode_name(r.mode), encoding_name(r.encoding)),
-                        ..blank(Kind::Serial, &r.name, r.enabled)
+                        ..with_parts(
+                            blank(Kind::Serial, &r.name, r.enabled),
+                            vec![format!("{com} · {}", r.baud), format!("{} :{}", mode_name(r.mode), r.tcp_port)],
+                        )
                     }
                 }
                 ForwardRule::Ssh(r) => {
@@ -160,29 +162,22 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                         None => r.ssh_target.clone(),
                     };
                     // 本地转发：本机监听 → 服务器 → 目标；远程转发的监听端口开在服务器上
-                    let (path, how, tag) = match r.direction {
-                        Direction::Local => (
-                            format!("127.0.0.1:{} → {server} → {}:{}", r.local_port, r.remote_host, r.remote_port),
-                            "本地转发",
-                            "-L",
-                        ),
-                        Direction::Remote => (
-                            format!("{server} 远端 :{} → {}:{}", r.local_port, r.remote_host, r.remote_port),
-                            "远程转发",
-                            "-R",
-                        ),
+                    let (listen, how, tag) = match r.direction {
+                        Direction::Local => (format!("127.0.0.1:{}", r.local_port), "本地转发", "-L"),
+                        Direction::Remote => (format!("远端 :{}", r.local_port), "远程转发", "-R"),
                     };
                     RuleRow {
-                        path,
                         sub: format!("{how} · 经 {}", r.ssh_target),
                         tag: tag.into(),
-                        ..blank(Kind::Ssh, &r.name, r.enabled)
+                        ..with_parts(
+                            blank(Kind::Ssh, &r.name, r.enabled),
+                            vec![listen, server, format!("{}:{}", r.remote_host, r.remote_port)],
+                        )
                     }
                 }
                 ForwardRule::Tcp(r) => RuleRow {
-                    path: format!("{} → {}", r.listen, r.target),
                     sub: format!("TCP · 最多 {} 个连接", r.max_connections),
-                    ..blank(Kind::Tcp, &r.name, r.enabled)
+                    ..with_parts(blank(Kind::Tcp, &r.name, r.enabled), vec![r.listen.clone(), r.target.clone()])
                 },
             };
 
@@ -243,11 +238,19 @@ fn rule_type(rule: &ForwardRule) -> RuleType {
     }
 }
 
+/// 填上路径的各段，并拼出整串路径。
+fn with_parts(mut row: RuleRow, parts: Vec<String>) -> RuleRow {
+    row.path = parts.join(" → ");
+    row.parts = parts;
+    row
+}
+
 fn blank(kind: Kind, name: &str, enabled: bool) -> RuleRow {
     RuleRow {
         kind,
         name: name.to_string(),
         path: String::new(),
+        parts: Vec::new(),
         sub: String::new(),
         status: String::new(),
         tone: Tone::Off,
