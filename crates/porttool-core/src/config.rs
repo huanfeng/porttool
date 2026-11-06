@@ -294,6 +294,65 @@ impl Config {
                 }
             }
         }
+        self.check_listen_conflicts()
+    }
+
+    /// 本机上所有会监听端口的已启用规则，以及 HTTP 服务。
+    ///
+    /// 串口的终端端口跟随 `server.bind`；SSH 本地转发（`-L`）固定监听 `127.0.0.1`，
+    /// 远程转发（`-R`）的 `local_port` 在服务器侧，不占本机端口；TCP 转发用自己的 `listen`。
+    fn listen_endpoints(&self) -> Vec<ListenEndpoint> {
+        let bind = ListenAddr::parse(&self.server.bind);
+        let mut out = vec![ListenEndpoint {
+            owner: "HTTP 服务".into(),
+            addr: bind.clone(),
+            port: self.server.http_port,
+        }];
+        for rule in self.rules.iter().filter(|r| r.enabled()) {
+            match rule {
+                ForwardRule::Serial(r) => out.push(ListenEndpoint {
+                    owner: format!("串口规则 `{}`", r.name),
+                    addr: bind.clone(),
+                    port: r.tcp_port,
+                }),
+                ForwardRule::Ssh(r) if r.direction == Direction::Local => out.push(ListenEndpoint {
+                    owner: format!("SSH 规则 `{}`", r.name),
+                    addr: ListenAddr::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+                    port: r.local_port,
+                }),
+                ForwardRule::Tcp(r) => {
+                    if let Ok(addr) = r.listen.parse::<std::net::SocketAddr>() {
+                        out.push(ListenEndpoint {
+                            owner: format!("TCP 规则 `{}`", r.name),
+                            addr: ListenAddr::Ip(addr.ip()),
+                            port: addr.port(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// 两个监听端点占用同一个端口且地址重叠时报错，指出冲突的两方。
+    fn check_listen_conflicts(&self) -> Result<()> {
+        let endpoints = self.listen_endpoints();
+        for (i, a) in endpoints.iter().enumerate() {
+            for b in &endpoints[i + 1..] {
+                if a.port == b.port && a.addr.overlaps(&b.addr) {
+                    bail!(
+                        "{} 的监听地址 {}:{} 与 {} 的 {}:{} 冲突",
+                        a.owner,
+                        a.addr,
+                        a.port,
+                        b.owner,
+                        b.addr,
+                        b.port
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -307,6 +366,53 @@ impl Config {
                 .join("logs"),
         }
     }
+}
+
+/// 监听地址：能解析成 IP 的按 IP 比较；`localhost` 视为 127.0.0.1；
+/// 其它主机名无法在这里解析，只和写法相同的名字比较。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListenAddr {
+    Ip(std::net::IpAddr),
+    Name(String),
+}
+
+impl ListenAddr {
+    fn parse(text: &str) -> Self {
+        let text = text.trim().trim_start_matches('[').trim_end_matches(']');
+        if text.eq_ignore_ascii_case("localhost") {
+            return Self::Ip(std::net::Ipv4Addr::LOCALHOST.into());
+        }
+        text.parse().map(Self::Ip).unwrap_or_else(|_| Self::Name(text.to_ascii_lowercase()))
+    }
+
+    /// 同一个端口上，两个地址是否会互相抢占：相同，或其中一个是同一地址族的通配地址。
+    fn overlaps(&self, other: &Self) -> bool {
+        use std::net::IpAddr;
+        match (self, other) {
+            (Self::Ip(a), Self::Ip(b)) => {
+                a == b
+                    || (a.is_unspecified() && matches!((a, b), (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))))
+                    || (b.is_unspecified() && matches!((a, b), (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))))
+            }
+            (Self::Name(a), Self::Name(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ip(ip) => write!(f, "{ip}"),
+            Self::Name(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+struct ListenEndpoint {
+    owner: String,
+    addr: ListenAddr,
+    port: u16,
 }
 
 pub fn is_valid_name(name: &str) -> bool {
@@ -445,5 +551,147 @@ mod tests {
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn rejects_ssh_and_tcp_listening_on_same_port() {
+        let config = parse(
+            r#"
+            [[rule]]
+            type = "ssh"
+            name = "dev"
+            ssh_target = "host"
+            local_port = 8080
+            remote_port = 80
+
+            [[rule]]
+            type = "tcp"
+            name = "web"
+            listen = "127.0.0.1:8080"
+            target = "127.0.0.1:9090"
+            "#,
+        );
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("dev") && err.contains("web") && err.contains("8080"), "{err}");
+    }
+
+    #[test]
+    fn wildcard_listen_overlaps_specific_address() {
+        let tcp = |listen_a: &str, listen_b: &str| {
+            parse(&format!(
+                r#"
+                [[rule]]
+                type = "tcp"
+                name = "a"
+                listen = "{listen_a}"
+                target = "127.0.0.1:9"
+
+                [[rule]]
+                type = "tcp"
+                name = "b"
+                listen = "{listen_b}"
+                target = "127.0.0.1:9"
+                "#
+            ))
+        };
+        assert!(tcp("0.0.0.0:8080", "127.0.0.1:8080").validate().is_err(), "通配与具体地址重叠");
+        assert!(tcp("127.0.0.1:8080", "127.0.0.1:8080").validate().is_err(), "相同地址重叠");
+        assert!(tcp("127.0.0.1:8080", "192.168.1.5:8080").validate().is_ok(), "不同具体地址不冲突");
+        assert!(tcp("0.0.0.0:8080", "[::]:8080").validate().is_ok(), "不同地址族的通配不算重叠");
+        assert!(tcp("0.0.0.0:8080", "0.0.0.0:8081").validate().is_ok(), "端口不同不冲突");
+    }
+
+    #[test]
+    fn ssh_remote_forward_does_not_use_local_port() {
+        let config = parse(
+            r#"
+            [[rule]]
+            type = "ssh"
+            name = "expose"
+            ssh_target = "host"
+            direction = "remote"
+            local_port = 8080
+            remote_port = 80
+
+            [[rule]]
+            type = "tcp"
+            name = "web"
+            listen = "0.0.0.0:8080"
+            target = "127.0.0.1:9090"
+            "#,
+        );
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn serial_http_and_net_rules_share_one_port_space() {
+        // 串口的终端端口跟随 server.bind（默认 0.0.0.0），与 SSH 本地转发的 127.0.0.1 重叠
+        let config = parse(
+            r#"
+            [[rule]]
+            type = "serial"
+            name = "esp32"
+            com = "COM3"
+            tcp_port = 7001
+
+            [[rule]]
+            type = "ssh"
+            name = "dev"
+            ssh_target = "host"
+            local_port = 7001
+            remote_port = 80
+            "#,
+        );
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("esp32") && err.contains("dev"), "{err}");
+
+        // HTTP 服务端口与 TCP 转发
+        let config = parse(
+            r#"
+            [server]
+            bind = "127.0.0.1"
+            http_port = 7000
+
+            [[rule]]
+            type = "tcp"
+            name = "web"
+            listen = "127.0.0.1:7000"
+            target = "127.0.0.1:9"
+            "#,
+        );
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("HTTP") && err.contains("web"), "{err}");
+    }
+
+    #[test]
+    fn disabled_rules_do_not_hold_ports() {
+        let config = parse(
+            r#"
+            [[rule]]
+            type = "tcp"
+            name = "a"
+            listen = "127.0.0.1:8080"
+            target = "127.0.0.1:9"
+            enabled = false
+
+            [[rule]]
+            type = "ssh"
+            name = "b"
+            ssh_target = "host"
+            local_port = 8080
+            remote_port = 80
+            "#,
+        );
+        config.validate().unwrap();
+        // 把停用的那条启用：此时才冲突
+        let mut config = config;
+        if let ForwardRule::Tcp(r) = &mut config.rules[0] {
+            r.enabled = true;
+        }
+        assert!(config.validate().is_err());
     }
 }
