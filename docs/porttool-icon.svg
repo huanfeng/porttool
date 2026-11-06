@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <title>PortTool</title>
+  <rect x="4" y="4" width="92" height="92" rx="20" fill="#2563eb"/>
+  <g fill="none" stroke="#fff" stroke-width="7.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M28 38h42M58 27l12 11-12 11M72 62H30m12-11L30 62l12 11"/>
+  </g>
+  <g fill="#fff"><circle cx="28" cy="38" r="6.5"/><circle cx="72" cy="62" r="6.5"/></g>
+</svg>

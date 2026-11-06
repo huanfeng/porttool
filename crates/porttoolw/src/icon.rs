@@ -1,4 +1,4 @@
-//! 程序化绘制的应用图标：圆角方块 + 串口（D-Sub）轮廓，右下角状态点。
+//! PortTool 图标：圆角方块中的双向连接线，托盘图标附带状态点。
 //!
 //! 用有向距离场逐像素计算覆盖率，任意尺寸都能 1:1 绘制，不需要位图资源。
 
@@ -21,13 +21,19 @@ pub fn render(size: u32, online: Option<bool>) -> WindowIcon {
             let mut color = [0f32; 4];
 
             blend(&mut color, BG, coverage(rounded_rect(p, (0.5, 0.5), (0.46, 0.46), 0.2), aa));
-            // D-Sub 外壳：上宽下窄的梯形
-            let shell = trapezoid(p, 0.5, 0.36, 0.64, 0.30, 0.22, 0.06);
-            blend(&mut color, FG, coverage(shell, aa));
-            // 针脚：上排 3 个、下排 2 个
-            for (cx, cy) in [(0.36, 0.44), (0.5, 0.44), (0.64, 0.44), (0.43, 0.56), (0.57, 0.56)] {
-                let d = circle(p, (cx, cy), 0.045);
-                blend(&mut color, BG, coverage(d, aa));
+            // 两条相反方向的线路与端点，代表不同类型端口之间的双向转发。
+            for (a, b) in [
+                ((0.28, 0.38), (0.70, 0.38)),
+                ((0.58, 0.27), (0.70, 0.38)),
+                ((0.58, 0.49), (0.70, 0.38)),
+                ((0.30, 0.62), (0.72, 0.62)),
+                ((0.42, 0.51), (0.30, 0.62)),
+                ((0.42, 0.73), (0.30, 0.62)),
+            ] {
+                blend(&mut color, FG, coverage(segment(p, a, b, 0.038), aa));
+            }
+            for center in [(0.28, 0.38), (0.72, 0.62)] {
+                blend(&mut color, FG, coverage(circle(p, center, 0.065), aa));
             }
             if let Some(on) = online {
                 let ring = circle(p, (0.8, 0.8), 0.19);
@@ -76,15 +82,12 @@ fn rounded_rect(p: (f32, f32), c: (f32, f32), half: (f32, f32), r: f32) -> f32 {
     outside + qx.max(qy).min(0.0) - r
 }
 
-/// 圆角梯形：中心 x、上下边的 y、上边半宽、下边半宽、圆角。距离是近似值，用于抗锯齿足够。
-fn trapezoid(p: (f32, f32), cx: f32, top: f32, bottom: f32, top_half: f32, bottom_half: f32, r: f32) -> f32 {
-    let t = ((p.1 - top) / (bottom - top)).clamp(0.0, 1.0);
-    let half = top_half + (bottom_half - top_half) * t - r;
-    let dx = (p.0 - cx).abs() - half;
-    let mid = (top + bottom) / 2.0;
-    let dy = (p.1 - mid).abs() - ((bottom - top) / 2.0 - r);
-    let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
-    outside + dx.max(dy).min(0.0) - r
+/// 带圆角端点的线段。
+fn segment(p: (f32, f32), a: (f32, f32), b: (f32, f32), radius: f32) -> f32 {
+    let (px, py) = (p.0 - a.0, p.1 - a.1);
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let t = ((px * dx + py * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    ((px - dx * t).powi(2) + (py - dy * t).powi(2)).sqrt() - radius
 }
 
 #[cfg(test)]

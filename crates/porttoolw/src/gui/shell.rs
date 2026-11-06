@@ -70,10 +70,17 @@ fn sidebar(gui: &Gui) -> Element {
     let attention = gui.summary_attention;
     let pill_role = attention.map(|a| if *a { Role::Warning } else { Role::Success });
 
+    let brand_icon = crate::icon::render(36, None);
     let brand = Element::col()
         .spacing(6)
         .padding_xy(6, 4)
-        .child(Element::label("PortTool").font_size(metrics.font_lg).font_weight(700))
+        .child(
+            Element::row()
+                .cross(Align::Center)
+                .spacing(8)
+                .child(Element::image_rgba(36, 36, brand_icon.rgba()).width(36).height(36))
+                .child(Element::label("PortTool").font_size(metrics.font_lg).font_weight(700)),
+        )
         .child(
             Element::label_signal(gui.summary)
                 .font_size(metrics.font_xs)
