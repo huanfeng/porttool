@@ -116,10 +116,6 @@ pub struct Gui {
     shown: Signal<Vec<RuleRow>>,
     /// 按类型分开的行（串口 / SSH / TCP 各页用）
     by_kind: [Signal<Vec<RuleRow>>; 3],
-    /// 串口页右侧的详情（0 或 1 个元素）
-    serial_detail: Signal<Vec<model::SerialDetail>>,
-    /// 串口详情已按哪个版本的选中信号计算过
-    detail_seen: Rc<Cell<u64>>,
     /// 单元素向量：概览统计卡片据此重建
     stats: Signal<Vec<Stats>>,
     /// 失败的规则：告警条据此显示
@@ -136,8 +132,6 @@ pub struct Gui {
     query: Signal<String>,
     /// 概览表格已按哪个版本的（筛选, 搜索）计算过
     filter_seen: Rc<Cell<(u64, u64)>>,
-    /// 串口页选中的规则名
-    selected_serial: Signal<String>,
     autostart: Signal<bool>,
     /// 配置文件解析失败的错误信息；非空时禁止在界面里保存配置
     load_error: Signal<String>,
@@ -267,7 +261,6 @@ impl Gui {
             rows: signal(Vec::new()),
             shown: signal(Vec::new()),
             by_kind: [signal(Vec::new()), signal(Vec::new()), signal(Vec::new())],
-            serial_detail: signal(Vec::new()),
             stats: signal(Vec::new()),
             alerts: signal(Vec::new()),
             summary: signal(String::new()),
@@ -277,7 +270,6 @@ impl Gui {
             filter: signal(0),
             query: signal(String::new()),
             filter_seen: Rc::new(Cell::new((0, 0))),
-            selected_serial: signal(String::new()),
             autostart: signal(autostart::is_enabled()),
             load_error: signal(load_error.unwrap_or_default()),
             http_url: signal(String::new()),
@@ -288,10 +280,8 @@ impl Gui {
             url_cache: Rc::new(RefCell::new(UrlCache::default())),
             dismissed_alerts: Rc::new(RefCell::new(HashSet::new())),
             editors: editors::Editors::new(),
-            detail_seen: Rc::new(Cell::new(0)),
         };
         gui.filter_seen.set((gui.filter.version(), gui.query.version()));
-        gui.detail_seen.set(gui.selected_serial.version());
         gui
     }
 
@@ -317,18 +307,11 @@ impl Gui {
                 let n = rows.iter().filter(|r| r.kind == kind).count();
                 self.nav_counts[i].set(n.to_string());
             }
-            // 串口页：选中的规则被删掉后回落到第一条
-            let first_serial = rows.iter().find(|r| r.kind == Kind::Serial).map(|r| r.name.clone());
-            let keep = self.selected_serial.with(|s| rows.iter().any(|r| r.kind == Kind::Serial && &r.name == s));
-            if !keep {
-                self.selected_serial.set(first_serial.unwrap_or_default());
-            }
             for (i, kind) in [Kind::Serial, Kind::Ssh, Kind::Tcp].into_iter().enumerate() {
                 let of_kind: Vec<RuleRow> = rows.iter().filter(|r| r.kind == kind).cloned().collect();
                 self.by_kind[i].set(of_kind);
             }
             self.recompute_shown();
-            self.recompute_detail();
         }
 
         let (summary, attention) = model::summary(&rows);
@@ -370,20 +353,7 @@ impl Gui {
             self.filter_seen.set(key);
             self.recompute_shown();
         }
-        if self.detail_seen.get() != self.selected_serial.version() {
-            self.recompute_detail();
-        }
         self.apply_switches()
-    }
-
-    fn recompute_detail(&self) {
-        self.detail_seen.set(self.selected_serial.version());
-        let selected = self.selected_serial.get();
-        let config = self.service.config_arc();
-        let detail: Vec<_> = model::serial_detail(&config, &selected).into_iter().collect();
-        if self.serial_detail.with(|d| *d != detail) {
-            self.serial_detail.set(detail);
-        }
     }
 
     fn recompute_shown(&self) {

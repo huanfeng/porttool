@@ -52,6 +52,8 @@ pub struct RuleRow {
     pub from: String,
     pub via: String,
     pub to: String,
+    /// 串口规则的终端端口（其它规则为 0）
+    pub port: u16,
 }
 
 /// 每次刷新都可能变化的数据（连接数、流量）。
@@ -154,6 +156,10 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                         name: r.name.clone(),
                         path: format!("{com} · {} → :{}", r.baud, r.tcp_port),
                         sub: format!("{} · {}", mode_name(r.mode), encoding_name(r.encoding)),
+                        from: format!("{com} · {}", r.baud),
+                        via: mode_name(r.mode).to_string(),
+                        to: format!("{} :{}", mode_name(r.mode), r.tcp_port),
+                        port: r.tcp_port,
                         ..blank(Kind::Serial, &r.name, r.enabled)
                     }
                 }
@@ -265,6 +271,7 @@ fn blank(kind: Kind, name: &str, enabled: bool) -> RuleRow {
         from: String::new(),
         via: String::new(),
         to: String::new(),
+        port: 0,
     }
 }
 
@@ -328,42 +335,6 @@ pub fn summary(rows: &[RuleRow]) -> (String, bool) {
         format!("{online}/{} 在线", rows.len())
     };
     (text, attention > 0)
-}
-
-/// 串口页右侧的详情。
-#[derive(Debug, Clone, PartialEq)]
-pub struct SerialDetail {
-    pub name: String,
-    pub device: String,
-    pub baud: u32,
-    pub mode: &'static str,
-    pub encoding: &'static str,
-    pub scope: String,
-    pub tcp_port: u16,
-}
-
-/// 选中的串口详情；`bind` 是服务监听地址，决定"局域网 / 仅本机"。
-pub fn serial_detail(config: &Config, selected: &str) -> Option<SerialDetail> {
-    let rule = config.serial_rules().find(|r| r.name == selected)?;
-    let bind = &config.server.bind;
-    let scope = if bind == "127.0.0.1" || bind == "localhost" || bind == "::1" {
-        format!("仅本机 {bind}")
-    } else {
-        format!("局域网 {bind}")
-    };
-    Some(SerialDetail {
-        name: rule.name.clone(),
-        device: rule
-            .com
-            .clone()
-            .or_else(|| rule.serial_number.as_ref().map(|s| format!("序列号 {s}")))
-            .unwrap_or_else(|| "—".into()),
-        baud: rule.baud,
-        mode: mode_name(rule.mode),
-        encoding: encoding_name(rule.encoding),
-        scope,
-        tcp_port: rule.tcp_port,
-    })
 }
 
 /// 失败的规则：告警条用。
@@ -613,6 +584,17 @@ mod tests {
         let healthy = build_rows(&config(), &[status("gitlab", RuleType::Ssh, State::Running, "运行中", 0)]);
         assert!(visible_alerts(&healthy, &mut dismissed).is_empty());
         assert_eq!(visible_alerts(&rows, &mut dismissed).len(), 1);
+    }
+
+    #[test]
+    fn serial_row_carries_what_the_flow_blocks_show() {
+        let rows = build_rows(&config(), &[]);
+        let a1 = rows.iter().find(|r| r.name == "A1").unwrap();
+        assert_eq!(a1.from, "COM5 · 1500000");
+        assert_eq!(a1.to, "telnet :7001");
+        assert_eq!((a1.via.as_str(), a1.port), ("telnet", 7001));
+        // 非串口规则没有终端端口
+        assert!(rows.iter().filter(|r| r.kind != Kind::Serial).all(|r| r.port == 0));
     }
 
     #[test]

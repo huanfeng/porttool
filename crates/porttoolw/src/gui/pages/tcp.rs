@@ -44,5 +44,5 @@ fn card(gui: &Gui, r: RuleRow) -> Element {
         .child(info_block("本机监听", &r.from).weight(1.0))
         .child(arrow())
         .child(info_block("目标", &r.to).weight(1.0));
-    rule_card(gui, &r, vec![flow, sub_line(gui, &r)], None)
+    rule_card(gui, &r, vec![flow, sub_line(gui, &r)])
 }

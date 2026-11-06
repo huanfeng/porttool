@@ -1,138 +1,56 @@
-//! 串口共享页：左侧规则卡片，右侧选中串口的详情。
+//! 串口共享页：与 SSH / TCP 页统一的规则卡片，「本机串口 → 终端连接」两段流程。
 
 use windui::prelude::*;
 
-use super::page_body;
-use crate::gui::model::{Kind, RuleRow, SerialDetail};
-use crate::gui::ui::{mono, page_header, panel};
+use super::{page_body, rule_card, sub_line};
+use crate::gui::model::{Kind, RuleRow};
+use crate::gui::ui::{info_block, page_header};
 use crate::gui::Gui;
-
-const DETAIL_W: i32 = 340;
 
 pub fn view(gui: &Gui) -> Element {
     let g = gui.clone();
-    let reload = Element::button("重新加载配置").outline().neutral().on_click({
-        let gui = gui.clone();
-        move |ctx| match gui.reload_from_file() {
-            Ok(()) => ctx.toast_ok("已重新加载配置"),
-            Err(e) => ctx.toast_err(format!("{e:#}")),
-        }
-    });
     let add = Element::button("＋ 添加串口").on_click({
         let gui = gui.clone();
         move |_| gui.editors.open(&gui, Kind::Serial, None)
     });
-
-    let list = Element::col()
-        .weight(1.0)
-        .height_match()
-        .spacing(12)
-        .child(
-            Element::list_signal(gui.by_kind[0], |r: &RuleRow| r.name.clone(), move |r: RuleRow| {
-                // 行间距靠外边距：list_signal 自身不设子项间距
-                card(&g, r).margin_edges(Insets { bottom: 12, ..Insets::default() })
-            })
-            .weight(1.0),
-        )
-        .child(add_card(gui));
-    let g = gui.clone();
-    let detail = Element::col().width(DETAIL_W).height_match().child(Element::host_signal(
-        gui.serial_detail,
-        move |d: SerialDetail| detail_panel(&g, d),
-    ));
+    let by_kind = gui.by_kind[0];
+    let list = Element::list_signal(by_kind, |r: &RuleRow| r.name.clone(), move |r: RuleRow| {
+        card(&g, r).margin_edges(Insets { left: 0, top: 0, right: 0, bottom: 12 })
+    })
+    .weight(1.0);
+    let empty = Element::label("还没有共享的串口，点右上角「添加串口」。")
+        .fg_role(Role::TextMuted)
+        .visible_when(move || by_kind.with(|v| v.is_empty()));
 
     page_body()
-        .child(page_header("串口共享", "把本机串口通过 TCP 共享给局域网内的终端", vec![reload, add]))
-        .child(Element::row().width_match().weight(1.0).spacing(16).child(list).child(detail))
+        .child(page_header("串口共享", "把本机串口通过 TCP 共享给局域网内的终端", vec![add]))
+        .child(empty)
+        .child(list)
 }
 
 fn card(gui: &Gui, r: RuleRow) -> Element {
-    let middle = vec![mono(r.path.clone()), super::sub_line(gui, &r)];
-    super::rule_card(gui, &r, middle, Some(gui.selected_serial))
-}
-
-fn add_card(gui: &Gui) -> Element {
-    let gui = gui.clone();
-    Element::col()
+    let arrow = || Element::label("→").font_size(20.0).fg_role(Role::TextMuted);
+    // 终端连接块：点一下复制连接命令（主机在点击时取，监听地址改了也跟着变）
+    let connect = {
+        let gui = gui.clone();
+        let (mode, port) = (r.via.clone(), r.port);
+        info_block("终端连接", &r.to)
+            .weight(1.0)
+            .clickable()
+            .tooltip("点击复制连接命令")
+            .on_click(move |ctx| {
+                let host = gui.host_for_commands();
+                let command = if mode == "raw" { format!("nc {host} {port}") } else { format!("telnet {host} {port}") };
+                ctx.clipboard_set(&command);
+                ctx.toast_ok(format!("已复制：{command}"));
+            })
+    };
+    let flow = Element::row()
         .width_match()
-        .padding(16)
-        .corner(10.0)
-        .border_role(Role::Border, 1)
         .cross(Align::Center)
-        .clickable()
-        .on_click(move |_| gui.editors.open(&gui, Kind::Serial, None))
-        .child(Element::label("＋ 添加串口").fg_role(Role::AccentText).font_weight(600))
-        .child(Element::label("接入设备后可在对话框里直接选择").fg_role(Role::TextMuted))
-}
-
-fn detail_panel(gui: &Gui, d: SerialDetail) -> Element {
-    let host = gui.host_for_commands();
-    let command = format!("telnet {host} {}", d.tcp_port);
-    let edit = {
-        let (gui, name) = (gui.clone(), d.name.clone());
-        Element::button("编辑").small().outline().neutral().on_click(move |_| {
-            gui.editors.open(&gui, Kind::Serial, Some(name.clone()))
-        })
-    };
-    let metrics = gui.metric_signals(&d.name);
-    let param = |k: &str, v: TextContent| {
-        Element::row()
-            .width_match()
-            .padding_xy(0, 6)
-            .child(Element::label(k.to_string()).fg_role(Role::TextMuted))
-            .child(Element::flex_spacer())
-            .child(mono(v))
-    };
-    let section = |t: &str| Element::label(t.to_string()).font_weight(700).padding_xy(0, 4);
-
-    let copy = {
-        let command = command.clone();
-        Element::icon_button("⧉").tooltip("复制").on_click(move |ctx| {
-            ctx.clipboard_set(&command);
-            ctx.toast_ok("已复制连接命令");
-        })
-    };
-
-    panel(
-        Element::col()
-            .width_match()
-            .padding(16)
-            .spacing(6)
-            .child(
-                Element::hstack()
-                    .width_match()
-                    .child(Element::label(format!("{} 详情", d.name)).font_size(16.0).font_weight(700))
-                    .child(Element::flex_spacer())
-                    .child(edit),
-            )
-            .child(section("连接方式"))
-            .child(
-                Element::row()
-                    .width_match()
-                    .cross(Align::Center)
-                    .bg_role(Role::SurfaceAlt)
-                    .corner(8.0)
-                    .padding_xy(12, 8)
-                    .child(mono(command).weight(1.0))
-                    .child(copy),
-            )
-            .child(section("参数"))
-            .child(param("设备", d.device.into()))
-            .child(param("波特率", d.baud.to_string().into()))
-            .child(param("终端模式", d.mode.to_string().into()))
-            .child(param("编码", d.encoding.to_string().into()))
-            .child(param("监听范围", d.scope.into()))
-            .child(
-                Element::hstack()
-                    .child(section("已连接终端 · "))
-                    .child(Element::label(metrics.clients).font_weight(700).padding_xy(0, 4)),
-            )
-            .child(param("接收", metrics.rx.into()))
-            .child(param("发送", metrics.tx.into()))
-            .child(
-                Element::label("单个终端的明细与断开功能暂未提供。")
-                    .fg_role(Role::TextSubtle)
-                    .width_match(),
-            ),
-    )
+        .spacing(12)
+        .child(info_block("本机串口", &r.from).weight(1.0))
+        .child(arrow())
+        .child(connect);
+    rule_card(gui, &r, vec![flow, sub_line(gui, &r)])
 }

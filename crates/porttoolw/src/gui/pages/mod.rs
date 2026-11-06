@@ -50,19 +50,8 @@ pub fn more_button(gui: &Gui, kind: Kind, name: &str) -> Element {
     })
 }
 
-/// 三个转发页共用的规则卡片：头部 = 名称（+类型徽章）+ 状态胶囊 + 开关 + …菜单，
-/// 中部由各页传入。`select` 不为空时（串口页）卡片可点击选中并高亮。
-pub fn rule_card(gui: &Gui, r: &RuleRow, middle: Vec<Element>, select: Option<Signal<String>>) -> Element {
-    let sel_bg = select.unwrap_or_else(|| signal(String::new()));
-    let bg_name = r.name.clone();
-    let bg = move || {
-        let theme = windui::theme::current();
-        if sel_bg.with(|s| *s == bg_name) {
-            theme.palette.accent.scale_alpha(0.10)
-        } else {
-            theme.palette.surface
-        }
-    };
+/// 三个转发页共用的规则卡片：头部 = 名称（+类型徽章）+ 状态胶囊 + 开关 + …菜单，中部由各页传入。
+pub fn rule_card(gui: &Gui, r: &RuleRow, middle: Vec<Element>) -> Element {
     let mut head = vec![
         Element::label(r.name.clone()).font_size(16.0).font_weight(700),
         status_pill(&r.status, r.tone).tooltip(r.detail.clone()),
@@ -71,27 +60,17 @@ pub fn rule_card(gui: &Gui, r: &RuleRow, middle: Vec<Element>, select: Option<Si
     if !r.tag.is_empty() {
         head.insert(1, Element::badge_intent(r.tag.clone(), Intent::Success));
     }
-    let actions = row_actions(gui, r);
-    head.push(actions);
+    head.push(row_actions(gui, r));
 
-    let container = Element::col()
+    Element::col()
         .width_match()
         .padding(16)
         .spacing(12)
         .border_role(Role::Divider, 1)
         .corner(10.0)
-        .bg_when(bg);
-    let mut card = match select {
-        Some(sel) => {
-            let name = r.name.clone();
-            container.clickable().on_click(move |_| sel.set(name.clone()))
-        }
-        None => container,
-    };
-    card = card
+        .bg_role(Role::Surface)
         .child(Element::hstack().width_match().cross(Align::Center).spacing(10).children(head))
-        .children(middle);
-    card
+        .children(middle)
 }
 
 /// 卡片副行：连接数 · 流量 · 参数（串口与 TCP 页共用）。

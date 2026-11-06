@@ -57,5 +57,5 @@ fn card(gui: &Gui, r: RuleRow) -> Element {
             .chain(std::iter::once(flow))
             .collect::<Vec<_>>()
     };
-    rule_card(gui, &r, middle, None)
+    rule_card(gui, &r, middle)
 }
