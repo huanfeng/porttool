@@ -371,6 +371,26 @@ pub fn failures(rows: &[RuleRow]) -> Vec<&RuleRow> {
     rows.iter().filter(|r| r.tone == Tone::Bad).collect()
 }
 
+/// 一条失败的标识：规则名 + 失败原因。原因变了就是新的失败，需要重新提醒。
+pub fn alert_key(row: &RuleRow) -> String {
+    format!("{}/{}|{}", row.kind.label(), row.name, row.detail)
+}
+
+/// 告警条要显示的失败：去掉用户已经关掉的；顺便把已不再失败（规则恢复或被删）的条目
+/// 从 `dismissed` 里清掉，这样同一条规则以后再失败时会重新提醒。
+pub fn visible_alerts(
+    rows: &[RuleRow],
+    dismissed: &mut std::collections::HashSet<String>,
+) -> Vec<RuleRow> {
+    let failing: Vec<(String, &RuleRow)> = failures(rows).into_iter().map(|r| (alert_key(r), r)).collect();
+    dismissed.retain(|key| failing.iter().any(|(k, _)| k == key));
+    failing
+        .into_iter()
+        .filter(|(key, _)| !dismissed.contains(key))
+        .map(|(_, r)| r.clone())
+        .collect()
+}
+
 /// 从 ssh 目标推断规则名：取别名或主机段（去掉 user@、端口和路径），小写，
 /// 规则名不允许的字符（点、空格等）按词折叠成 `-`。
 pub fn suggested_name(target: &str, existing: &[String]) -> String {
@@ -563,6 +583,36 @@ mod tests {
         assert_eq!(text, "1/3 在线 · 1 需处理");
         assert!(attention);
         assert_eq!(failures(&rows).len(), 1);
+    }
+
+    #[test]
+    fn dismissed_alerts_stay_hidden_until_the_failure_changes_or_recurs() {
+        let failed = |detail: &str| {
+            build_rows(
+                &config(),
+                &[status("gitlab", RuleType::Ssh, State::Failed, detail, 0)],
+            )
+        };
+        let mut dismissed = std::collections::HashSet::new();
+
+        // 第一次失败：要提醒；关掉后不再显示
+        let rows = failed("Permission denied");
+        let shown = visible_alerts(&rows, &mut dismissed);
+        assert_eq!(shown.len(), 1);
+        dismissed.insert(alert_key(&shown[0]));
+        assert!(visible_alerts(&rows, &mut dismissed).is_empty());
+
+        // 原因变了：是新的失败，重新提醒
+        let rows = failed("Connection refused");
+        assert_eq!(visible_alerts(&rows, &mut dismissed).len(), 1);
+        assert!(dismissed.is_empty(), "旧的已不再出现，应被清理");
+
+        // 关掉后恢复，之后以同样的原因再失败：重新提醒
+        let shown = visible_alerts(&rows, &mut dismissed);
+        dismissed.insert(alert_key(&shown[0]));
+        let healthy = build_rows(&config(), &[status("gitlab", RuleType::Ssh, State::Running, "运行中", 0)]);
+        assert!(visible_alerts(&healthy, &mut dismissed).is_empty());
+        assert_eq!(visible_alerts(&rows, &mut dismissed).len(), 1);
     }
 
     #[test]

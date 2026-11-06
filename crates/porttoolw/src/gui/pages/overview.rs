@@ -80,6 +80,7 @@ fn stat_cards(stats: Signal<Vec<Stats>>) -> Element {
 
 /// 有规则失败时显示的告警条；「查看详情」跳到对应页面。
 fn alert_bar(gui: &Gui) -> Element {
+    let gui_for_close = gui.clone();
     let alerts = gui.alerts;
     let page = gui.page;
     let text = alerts.map(|a| match a.first() {
@@ -107,6 +108,12 @@ fn alert_bar(gui: &Gui) -> Element {
                 None => 0,
             });
         }))
+        .child(
+            Element::icon_button("×")
+                .tooltip("关闭提示（有新的失败时会再次出现）")
+                .on_click(move |_| gui_for_close.dismiss_alerts()),
+        )
+        .spacing(8)
         .visible_when(move || alerts.with(|a| !a.is_empty()))
 }
 

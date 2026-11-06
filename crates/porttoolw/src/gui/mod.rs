@@ -11,7 +11,7 @@ mod shell;
 mod ui;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -150,6 +150,8 @@ pub struct Gui {
     /// 规则名 → 实时数据信号；同样建在行作用域之外
     metrics: Rc<RefCell<HashMap<String, MetricSignals>>>,
     url_cache: Rc<RefCell<UrlCache>>,
+    /// 用户已经关掉的失败提示（见 `model::alert_key`）
+    dismissed_alerts: Rc<RefCell<HashSet<String>>>,
     editors: editors::Editors,
 }
 
@@ -284,6 +286,7 @@ impl Gui {
             switches: Rc::new(RefCell::new(HashMap::new())),
             metrics: Rc::new(RefCell::new(HashMap::new())),
             url_cache: Rc::new(RefCell::new(UrlCache::default())),
+            dismissed_alerts: Rc::new(RefCell::new(HashSet::new())),
             editors: editors::Editors::new(),
             detail_seen: Rc::new(Cell::new(0)),
         };
@@ -309,7 +312,7 @@ impl Gui {
         }
         if self.rows.with(|r| *r != rows) {
             self.rows.set(rows.clone());
-            self.alerts.set(model::failures(&rows).into_iter().cloned().collect());
+            self.recompute_alerts(&rows);
             for (i, kind) in [Kind::Serial, Kind::Ssh, Kind::Tcp].into_iter().enumerate() {
                 let n = rows.iter().filter(|r| r.kind == kind).count();
                 self.nav_counts[i].set(n.to_string());
@@ -342,6 +345,21 @@ impl Gui {
 
         let online = rows.iter().filter(|r| r.tone == model::Tone::Ok).count();
         (format!("PortTool — {online}/{} 条规则在线", rows.len()), online > 0)
+    }
+
+    /// 失败提示：去掉用户已关掉的。
+    fn recompute_alerts(&self, rows: &[RuleRow]) {
+        let shown = model::visible_alerts(rows, &mut self.dismissed_alerts.borrow_mut());
+        if self.alerts.with(|a| *a != shown) {
+            self.alerts.set(shown);
+        }
+    }
+
+    /// 关掉当前显示的失败提示；之后换了新的失败或同一条恢复后再失败，会重新出现。
+    pub fn dismiss_alerts(&self) {
+        let shown = self.alerts.get();
+        self.dismissed_alerts.borrow_mut().extend(shown.iter().map(model::alert_key));
+        self.alerts.set(Vec::new());
     }
 
     /// 输入类状态（筛选、搜索框、选中项、行内开关）没有变化回调，由定时器轮询，
@@ -877,6 +895,47 @@ pub(super) mod tests {
         gui.refresh();
         gui.refresh();
         assert!(Arc::ptr_eq(&before, &gui.service.config_arc()), "刷新不应改动配置");
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn dismissing_the_alert_survives_refresh() {
+        use porttool_core::config::SshRule;
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        // 加一条必然失败的 SSH 规则：目标以 - 开头会被校验拒绝，改用不存在的 ssh 目标 + 无自动重连
+        let mut config = gui.editable_config().unwrap();
+        config.rules.push(ForwardRule::Ssh(SshRule {
+            name: "broken".into(),
+            ssh_target: "nobody@host.invalid".into(),
+            ssh_port: None,
+            identity_file: None,
+            direction: porttool_core::config::Direction::Local,
+            local_port: free_addr().rsplit(':').next().unwrap().parse().unwrap(),
+            remote_host: "127.0.0.1".into(),
+            remote_port: 22,
+            auto_reconnect: false,
+            enabled: true,
+        }));
+        gui.apply_config(config).unwrap();
+        // 等 ssh 失败（找不到主机，或本机没有 ssh 时启动失败，两种都是失败）
+        let mut shown = false;
+        for _ in 0..100 {
+            gui.refresh();
+            if !gui.alerts.with(|a| a.is_empty()) {
+                shown = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(shown, "失败的规则应出现在告警条里");
+
+        gui.dismiss_alerts();
+        assert!(gui.alerts.with(|a| a.is_empty()));
+        // 之后刷新（失败原因没变）也不能再出现
+        gui.refresh();
+        gui.refresh();
+        assert!(gui.alerts.with(|a| a.is_empty()), "关掉后刷新不应再显示");
         runtime.block_on(gui.service.shutdown());
     }
 }
