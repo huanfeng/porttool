@@ -68,8 +68,15 @@ SSH 转发需要系统里已安装 OpenSSH 客户端（Windows 10+ 自带）。
 ### 命令行参数
 
 ```
-porttoolw [--config <path>] [--autostart]
-  --autostart   只显示托盘，不打开主窗口（开机自启使用）
+porttoolw [--config <path>] [--autostart] [--no-single-instance]
+  --autostart          只显示托盘，不打开主窗口（开机自启使用）
+  --no-single-instance 不走单实例，可与已在运行的 PortTool 并存；不会改动开机自启。测试时配合 --config 使用
+```
+
+想看界面或测试列表滚动，可以用仓库里的 `demo-config.toml`（32 条规则、各种状态，只监听本机、不会真正外连）：
+
+```sh
+porttoolw --no-single-instance --config demo-config.toml
 ```
 
 porttoolw 是 GUI 程序，命令行功能都在 `porttool` 里：

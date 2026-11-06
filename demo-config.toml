@@ -1,0 +1,290 @@
+# PortTool 演示 / 测试用配置：规则多，用来看列表滚动、各种状态和告警条。
+# 安全：只监听 127.0.0.1；SSH 目标用 .invalid 域名，不会真正外连；串口 COM250+ 不存在，处于“等待设备”。
+#
+#   porttoolw --no-single-instance --config demo-config.toml
+#
+# --no-single-instance 让它能和已经在运行的 PortTool 并存，也不会改动开机自启。
+
+[server]
+bind = "127.0.0.1"
+http_port = 47800
+
+[[rule]]
+type = "serial"
+name = "uart-1"
+com = "COM250"
+baud = 115200
+tcp_port = 47801
+mode = "telnet"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "uart-2"
+com = "COM251"
+baud = 921600
+tcp_port = 47802
+mode = "telnet"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "uart-3"
+com = "COM252"
+baud = 1500000
+tcp_port = 47803
+mode = "telnet"
+enabled = false
+
+[[rule]]
+type = "serial"
+name = "uart-4"
+com = "COM253"
+baud = 9600
+tcp_port = 47804
+mode = "raw"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "uart-5"
+com = "COM254"
+baud = 115200
+tcp_port = 47805
+mode = "telnet"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "uart-6"
+com = "COM255"
+baud = 921600
+tcp_port = 47806
+mode = "telnet"
+enabled = false
+
+[[rule]]
+type = "serial"
+name = "uart-7"
+com = "COM256"
+baud = 1500000
+tcp_port = 47807
+mode = "telnet"
+enabled = true
+
+[[rule]]
+type = "serial"
+name = "uart-8"
+com = "COM257"
+baud = 9600
+tcp_port = 47808
+mode = "raw"
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "jump-1"
+ssh_target = "ops@jump.invalid"
+local_port = 47810
+remote_host = "192.168.5.88"
+remote_port = 22
+direction = "local"
+auto_reconnect = true
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "dev-2"
+ssh_target = "ops@dev.invalid"
+local_port = 47811
+remote_host = "gitlab.internal"
+remote_port = 443
+direction = "local"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "lab-3"
+ssh_target = "ops@lab.invalid"
+local_port = 47812
+remote_host = "10.0.0.12"
+remote_port = 3306
+direction = "local"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "ci-4"
+ssh_target = "ops@ci.invalid"
+local_port = 47813
+remote_host = "127.0.0.1"
+remote_port = 8080
+direction = "local"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "gitlab-5"
+ssh_target = "ops@gitlab.invalid"
+local_port = 47814
+remote_host = "192.168.5.88"
+remote_port = 22
+direction = "remote"
+auto_reconnect = true
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "db-6"
+ssh_target = "ops@db.invalid"
+local_port = 47815
+remote_host = "gitlab.internal"
+remote_port = 443
+direction = "local"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "nas-7"
+ssh_target = "ops@nas.invalid"
+local_port = 47816
+remote_host = "10.0.0.12"
+remote_port = 3306
+direction = "local"
+auto_reconnect = false
+enabled = false
+
+[[rule]]
+type = "ssh"
+name = "edge-8"
+ssh_target = "ops@edge.invalid"
+local_port = 47817
+remote_host = "127.0.0.1"
+remote_port = 8080
+direction = "local"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "proxy-9"
+ssh_target = "ops@proxy.invalid"
+local_port = 47818
+remote_host = "192.168.5.88"
+remote_port = 22
+direction = "local"
+auto_reconnect = true
+enabled = true
+
+[[rule]]
+type = "ssh"
+name = "build-10"
+ssh_target = "ops@build.invalid"
+local_port = 47819
+remote_host = "gitlab.internal"
+remote_port = 443
+direction = "remote"
+auto_reconnect = false
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "web-ui"
+listen = "127.0.0.1:47830"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "mqtt"
+listen = "127.0.0.1:47831"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "redis"
+listen = "127.0.0.1:47832"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "postgres"
+listen = "127.0.0.1:47833"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "grafana"
+listen = "127.0.0.1:47834"
+target = "127.0.0.1:9"
+enabled = false
+
+[[rule]]
+type = "tcp"
+name = "prometheus"
+listen = "127.0.0.1:47835"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "nginx"
+listen = "127.0.0.1:47836"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "api"
+listen = "127.0.0.1:47837"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "ssh-alt"
+listen = "127.0.0.1:47838"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "ftp"
+listen = "127.0.0.1:47839"
+target = "127.0.0.1:9"
+enabled = false
+
+[[rule]]
+type = "tcp"
+name = "dns"
+listen = "127.0.0.1:47840"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "cache"
+listen = "127.0.0.1:47841"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "metrics"
+listen = "127.0.0.1:47842"
+target = "127.0.0.1:9"
+enabled = true
+
+[[rule]]
+type = "tcp"
+name = "admin"
+listen = "127.0.0.1:47843"
+target = "127.0.0.1:9"
+enabled = true
