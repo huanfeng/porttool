@@ -158,6 +158,7 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     load_error: Option<String>,
     open_window: bool,
+    single_instance: bool,
 ) {
     let gui = Gui::new(service, runtime, load_error);
     let (tooltip, online) = gui.refresh();
@@ -183,10 +184,12 @@ pub fn run(
 
     // 第二次启动时打开主窗口。单实例回调拿不到 ctx，记一个标志交给定时器处理。
     let pending_open = Rc::new(Cell::new(false));
-    app = app.single_instance(APP_ID, {
-        let pending_open = pending_open.clone();
-        move |_argv| pending_open.set(true)
-    });
+    if single_instance {
+        app = app.single_instance(APP_ID, {
+            let pending_open = pending_open.clone();
+            move |_argv| pending_open.set(true)
+        });
+    }
 
     let last_tray = RefCell::new((tooltip, online));
     let ticks = Cell::new(0u32);

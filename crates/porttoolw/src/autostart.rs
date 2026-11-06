@@ -1,6 +1,8 @@
 //! 开机自启：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
 
-use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::{bail, Result};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 
@@ -8,6 +10,13 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "porttool";
 /// 自启动时带上这个参数：只显示托盘，不弹主窗口。
 pub const AUTOSTART_ARG: &str = "--autostart";
+
+/// 测试用的非单例实例：不允许改动开机自启，免得把注册表指向测试用的 exe。
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_read_only() {
+    READ_ONLY.store(true, Ordering::Relaxed);
+}
 
 pub fn is_enabled() -> bool {
     RegKey::predef(HKEY_CURRENT_USER)
@@ -17,6 +26,9 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn set_enabled(enabled: bool) -> Result<()> {
+    if READ_ONLY.load(Ordering::Relaxed) {
+        bail!("测试实例（--no-single-instance）不修改开机自启");
+    }
     let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)?;
     if enabled {
         key.set_value(VALUE_NAME, &current_command())?;

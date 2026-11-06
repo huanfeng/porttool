@@ -23,6 +23,10 @@ struct Args {
     /// 开机自启时使用：只显示托盘图标，不打开主窗口
     #[arg(long)]
     autostart: bool,
+    /// 不使用单实例：允许与已在运行的 PortTool 并存。测试时配合 `--config` 使用模拟配置；
+    /// 这种实例不会改动开机自启的注册表。
+    #[arg(long)]
+    no_single_instance: bool,
 }
 
 fn main() -> Result<()> {
@@ -35,7 +39,8 @@ fn main() -> Result<()> {
     // 单实例：已有实例在运行时把参数转交给它（它会打开主窗口）后直接退出。
     // 必须在启动服务之前判断，否则第二个实例会去抢占串口、往同一份日志里写错误。
     let screenshot = cut < argv.len();
-    if !screenshot && windui::claim_instance(gui::APP_ID) == windui::InstanceRole::Handoff {
+    let single_instance = !screenshot && !args.no_single_instance;
+    if single_instance && windui::claim_instance(gui::APP_ID) == windui::InstanceRole::Handoff {
         return Ok(());
     }
 
@@ -54,9 +59,20 @@ fn main() -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     let service = runtime.block_on(Service::start(config, config_path.clone(), |_| {}))?;
-    // 换了安装位置（如 Scoop 升级）时，把自启动注册表路径跟上
-    autostart::refresh();
-    gui::run(service.clone(), runtime.handle().clone(), load_error, !args.autostart);
+    // 换了安装位置（如 Scoop 升级）时，把自启动注册表路径跟上；
+    // 测试用的非单例实例不动注册表，免得把自启指向 target\debug 里的 exe。
+    if single_instance {
+        autostart::refresh();
+    } else {
+        autostart::set_read_only();
+    }
+    gui::run(
+        service.clone(),
+        runtime.handle().clone(),
+        load_error,
+        !args.autostart,
+        single_instance,
+    );
     runtime.block_on(service.shutdown());
     Ok(())
 }
