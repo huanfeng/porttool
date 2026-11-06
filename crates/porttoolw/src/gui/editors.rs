@@ -103,9 +103,21 @@ fn used_ports(config: &porttool_core::Config) -> Vec<u16> {
     used
 }
 
-/// 从候选端口里挑第一个能绑定成功的；找不到返回 `None`（交回人工填写）。
-fn first_free_port(used: &[u16]) -> Option<u16> {
-    model::next_candidate_ports(used).into_iter().find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok())
+/// 从候选端口里挑第一个能在 `host` 上绑定成功的；找不到返回 `None`（交回人工填写）。
+///
+/// `host` 要是规则实际会监听的地址：串口跟随 `server.bind`，SSH 本地转发是 127.0.0.1，
+/// TCP 转发是它自己的监听地址——换一个地址探测，结果可能和真正运行时不一样。
+fn first_free_port(host: &str, used: &[u16]) -> Option<u16> {
+    model::next_candidate_ports(used)
+        .into_iter()
+        .find(|p| std::net::TcpListener::bind((host, *p)).is_ok())
+}
+
+/// 从 `start` 起（最多试 64 个）找第一个既没被配置里的规则用、又能在 `host` 上绑定的端口。
+fn first_free_port_from(host: &str, start: u16, used: &[u16]) -> Option<u16> {
+    (start..=u16::MAX)
+        .take(64)
+        .find(|p| !used.contains(p) && std::net::TcpListener::bind((host, *p)).is_ok())
 }
 
 fn parse_port(text: &str, what: &str) -> Result<u16, String> {
@@ -115,20 +127,43 @@ fn parse_port(text: &str, what: &str) -> Result<u16, String> {
     }
 }
 
-/// 端口是否可用：尝试在所有网卡上绑定一下。编辑时端口没改就不检查（正被自己占着）。
-fn port_hint(text: &str, original: Option<u16>) -> String {
+/// 端口是否可用：在规则实际会监听的 `host` 上试绑一下。编辑时端口没改就不检查（正被自己占着）。
+/// `host` 为 `None`（端口不在本机，如 SSH 远程转发）时只检查格式。
+fn port_hint(host: Option<&str>, text: &str, original: Option<u16>) -> String {
     let Ok(port) = text.trim().parse::<u16>() else {
         return "端口必须是 1–65535 的整数".into();
     };
     if port == 0 {
         return "端口必须是 1–65535 的整数".into();
     }
+    let Some(host) = host else {
+        return String::new();
+    };
     if Some(port) == original {
         return String::new();
     }
-    match std::net::TcpListener::bind(("0.0.0.0", port)) {
+    match std::net::TcpListener::bind((host, port)) {
         Ok(_) => "✓ 端口可用".into(),
         Err(_) => "✕ 端口已被占用".into(),
+    }
+}
+
+/// TCP 规则的监听地址（`IP:端口`）能否使用：格式不对或已被占用时给出提示。
+/// 编辑时地址没改就不检查（正被自己占着）。
+fn listen_hint(text: &str, original: Option<&str>) -> String {
+    let text = text.trim();
+    let Ok(addr) = text.parse::<std::net::SocketAddr>() else {
+        return "监听地址格式应为 IP:端口，例如 0.0.0.0:8080".into();
+    };
+    if addr.port() == 0 {
+        return "端口必须是 1–65535 的整数".into();
+    }
+    if original == Some(text) {
+        return String::new();
+    }
+    match std::net::TcpListener::bind(addr) {
+        Ok(_) => "✓ 地址可用".into(),
+        Err(_) => "✕ 地址已被占用".into(),
     }
 }
 
@@ -261,6 +296,9 @@ impl SerialEditor {
             .map(|p| p.tcp_port)
             .max()
             .map_or(7001, |p| p.saturating_add(1));
+        // 串口端口从现有串口的下一个号接着排；在实际监听地址（server.bind）上试绑，
+        // 并避开配置里别的规则已经用了的端口
+        let next_port = first_free_port_from(&config.server.bind, next_port, &used_ports(config)).unwrap_or(next_port);
         let p = existing.clone().unwrap_or(SerialRule {
             name: String::new(),
             serial_number: None,
@@ -338,6 +376,11 @@ impl SerialEditor {
             move || original.borrow().as_ref().map(|(_, p)| *p)
         };
         let hint = self.port_hint;
+        // 终端端口跟随 server.bind；每次现读，设置页改过监听地址也能跟上
+        let bind = {
+            let gui = gui.clone();
+            move || gui.service.config().server.bind
+        };
 
         let body = Element::col()
             .width_match()
@@ -373,7 +416,7 @@ impl SerialEditor {
                             .on_commit({
                                 let up = update_preview.clone();
                                 move |_| {
-                                    hint.set(port_hint(&tcp_port.get(), original_port()));
+                                    hint.set(port_hint(Some(&bind()), &tcp_port.get(), original_port()));
                                     up();
                                 }
                             }),
@@ -491,7 +534,7 @@ impl SshEditor {
             identity_file: None,
             direction: Direction::Local,
             // 监听端口自动分配：接着现有规则用过的最大端口号试绑，避开占用
-            local_port: first_free_port(&used_ports(config)).unwrap_or(8080),
+            local_port: first_free_port("127.0.0.1", &used_ports(config)).unwrap_or(8080),
             remote_host: "127.0.0.1".into(),
             remote_port: 80,
             auto_reconnect: true,
@@ -513,6 +556,14 @@ impl SshEditor {
         self.error.set(String::new());
         self.update_preview();
         self.show.set(true);
+    }
+
+    /// 监听端口的可用性提示：本地转发（-L）在 127.0.0.1 上试绑；
+    /// 远程转发（-R）的端口开在服务器上，本机无从检查，只检查格式。
+    fn refresh_port_hint(&self) {
+        let original = self.original.borrow().as_ref().map(|(_, p)| *p);
+        let host = (self.direction.get() != 1).then_some("127.0.0.1");
+        self.port_hint.set(port_hint(host, &self.local_port.get(), original));
     }
 
     fn update_preview(&self) {
@@ -599,7 +650,13 @@ impl SshEditor {
                     .width(FIELD_W)
                     .on_segment_change({
                         let t = self.clone();
-                        move |_, _| t.update_preview()
+                        move |_, _| {
+                            t.update_preview();
+                            // 方向变了，端口检查的地址也跟着变；还没填端口时不提示
+                            if !t.local_port.get().trim().is_empty() {
+                                t.refresh_port_hint();
+                            }
+                        }
                     }),
             ))
             .child(Element::field(
@@ -644,8 +701,7 @@ impl SshEditor {
                     .child(Element::text_input(self.local_port, "8080").numeric().width(SHORT_W).on_commit({
                         let t = self.clone();
                         move |_| {
-                            let original = t.original.borrow().as_ref().map(|(_, p)| *p);
-                            hint.set(port_hint(&t.local_port.get(), original));
+                            t.refresh_port_hint();
                             t.update_preview();
                         }
                     }))
@@ -706,8 +762,11 @@ struct TcpEditor {
     show: Signal<bool>,
     title: Signal<String>,
     original: Rc<RefCell<Option<String>>>,
+    /// 编辑时规则原来的监听地址：没改就不检查占用
+    original_listen: Rc<RefCell<Option<String>>>,
     name: Signal<String>,
     listen: Signal<String>,
+    listen_hint: Signal<String>,
     target: Signal<String>,
     max_conns: Signal<String>,
     enabled: Signal<bool>,
@@ -720,8 +779,10 @@ impl TcpEditor {
             show: signal(false),
             title: signal(String::new()),
             original: Rc::new(RefCell::new(None)),
+            original_listen: Rc::new(RefCell::new(None)),
             name: signal(String::new()),
             listen: signal(String::new()),
+            listen_hint: signal(String::new()),
             target: signal(String::new()),
             max_conns: signal(String::new()),
             enabled: signal(true),
@@ -737,7 +798,8 @@ impl TcpEditor {
             })
         });
         let r = existing.clone().unwrap_or_else(|| {
-            let port = first_free_port(&used_ports(config)).unwrap_or(8080);
+            // 新规则默认监听 0.0.0.0，就在 0.0.0.0 上试绑
+            let port = first_free_port("0.0.0.0", &used_ports(config)).unwrap_or(8080);
             TcpRule {
                 name: String::new(),
                 listen: format!("0.0.0.0:{port}"),
@@ -747,6 +809,8 @@ impl TcpEditor {
             }
         });
         *self.original.borrow_mut() = existing.as_ref().map(|e| e.name.clone());
+        *self.original_listen.borrow_mut() = existing.as_ref().map(|e| e.listen.clone());
+        self.listen_hint.set(String::new());
         self.title.set(if existing.is_some() { "编辑 TCP 转发".into() } else { "添加 TCP 转发".into() });
         self.name.set(r.name);
         self.listen.set(r.listen);
@@ -790,10 +854,14 @@ impl TcpEditor {
             .child(Element::field("名称", Element::text_input(self.name, "例如 web-ui").width(FIELD_W)))
             .child(Element::field(
                 "监听地址",
-                Element::text_input(self.listen, "0.0.0.0:8080").width(FIELD_W),
+                Element::text_input(self.listen, "0.0.0.0:8080").width(FIELD_W).on_commit({
+                    let (listen, hint, original) = (self.listen, self.listen_hint, self.original_listen.clone());
+                    move |_| hint.set(listen_hint(&listen.get(), original.borrow().as_deref()))
+                }),
             ))
             .child(Element::label("格式为 IP:端口；0.0.0.0 表示局域网可访问，127.0.0.1 仅本机")
                 .fg_role(Role::TextMuted))
+            .child(hint_label(self.listen_hint))
             .child(Element::field(
                 "目标地址",
                 Element::text_input(self.target, "192.168.1.100:80").width(FIELD_W),
@@ -948,10 +1016,53 @@ mod tests {
     fn port_hint_detects_occupied_and_unchanged() {
         let l = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        assert!(port_hint(&port.to_string(), None).contains("占用"));
-        assert!(port_hint(&port.to_string(), Some(port)).is_empty(), "未修改的端口不检查");
+        let any = Some("0.0.0.0");
+        assert!(port_hint(any, &port.to_string(), None).contains("占用"));
+        assert!(port_hint(any, &port.to_string(), Some(port)).is_empty(), "未修改的端口不检查");
         drop(l);
-        assert!(port_hint(&port.to_string(), None).contains("可用"));
-        assert!(port_hint("x", None).contains("整数"));
+        assert!(port_hint(any, &port.to_string(), None).contains("可用"));
+        assert!(port_hint(any, "x", None).contains("整数"));
+    }
+
+    #[test]
+    fn port_probe_uses_the_address_the_rule_will_listen_on() {
+        // 127.0.0.1 上的端口被占：按 127.0.0.1 探测（SSH 本地转发、仅本机的串口）必须报占用
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(port_hint(Some("127.0.0.1"), &port.to_string(), None).contains("占用"));
+        // 远程转发的端口在服务器上：不探测本机，只检查格式
+        assert!(port_hint(None, &port.to_string(), None).is_empty());
+        assert!(port_hint(None, "0", None).contains("整数"));
+
+        // 自动分配跳过被占用的端口，并且只在给定地址上探测
+        let found = first_free_port("127.0.0.1", &[port - 1]).unwrap();
+        assert_ne!(found, port, "被占用的候选应被跳过");
+        assert!(found > port - 1);
+        drop(l);
+        assert_eq!(first_free_port("127.0.0.1", &[port - 1]), Some(port), "释放后又可用");
+    }
+
+    #[test]
+    fn serial_default_port_continues_after_serial_ports_and_avoids_used() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        // 从 port 起：被占的 port 跳过
+        assert_ne!(first_free_port_from("127.0.0.1", port, &[]), Some(port));
+        // 配置里别的规则（可能没在运行，绑不出占用）用着的端口也要跳过
+        drop(l);
+        assert_eq!(first_free_port_from("127.0.0.1", port, &[]), Some(port));
+        assert_ne!(first_free_port_from("127.0.0.1", port, &[port]), Some(port));
+    }
+
+    #[test]
+    fn listen_hint_checks_format_and_occupation() {
+        assert!(listen_hint("not-an-address", None).contains("IP:端口"));
+        assert!(listen_hint("127.0.0.1:0", None).contains("整数"));
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        assert!(listen_hint(&addr, None).contains("占用"));
+        assert!(listen_hint(&addr, Some(&addr)).is_empty(), "地址没改不检查");
+        drop(l);
+        assert!(listen_hint(&addr, None).contains("可用"));
     }
 }
