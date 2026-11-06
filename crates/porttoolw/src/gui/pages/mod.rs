@@ -95,8 +95,15 @@ pub fn rule_card(gui: &Gui, r: &RuleRow, middle: Vec<Element>, select: Option<Si
 }
 
 /// 卡片副行：连接数 · 流量 · 参数（串口与 TCP 页共用）。
-pub fn sub_line(r: &RuleRow) -> Element {
-    Element::label(format!("{} · {} · {}", r.conns, r.traffic, r.sub)).fg_role(Role::TextMuted)
+pub fn sub_line(gui: &Gui, r: &RuleRow) -> Element {
+    let metrics = gui.metric_signals(&r.name);
+    let part = |text: TextContent| Element::label(text).fg_role(Role::TextMuted);
+    Element::hstack()
+        .spacing(0)
+        .child(part(metrics.conns.into()))
+        .child(part(" · ".into()))
+        .child(part(metrics.traffic.into()))
+        .child(part(format!(" · {}", r.sub).into()))
 }
 
 /// 「新建」按钮：弹出类型菜单。

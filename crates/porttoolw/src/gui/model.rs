@@ -1,5 +1,7 @@
 //! 视图模型：把配置 + 运行状态整理成界面直接显示的行和统计。纯函数，不依赖 windui。
 
+use std::collections::HashMap;
+
 use porttool_core::config::{Config, Direction, Encoding, ForwardRule, TerminalMode};
 use porttool_core::forwarding::{ForwardStatus, RuleType, State};
 use porttool_core::port::PortSnapshot;
@@ -43,10 +45,6 @@ pub struct RuleRow {
     pub tone: Tone,
     /// 状态详情（失败原因、重连倒计时等）
     pub detail: String,
-    /// 连接数，没有该数据时为 `—`
-    pub conns: String,
-    /// 流量，没有该数据时为 `—`
-    pub traffic: String,
     pub enabled: bool,
     /// SSH 规则的方向标签，例如 `本地 -L`
     pub tag: String,
@@ -54,6 +52,43 @@ pub struct RuleRow {
     pub from: String,
     pub via: String,
     pub to: String,
+}
+
+/// 每次刷新都可能变化的数据（连接数、流量）。
+///
+/// 与结构性的 [`RuleRow`] 分开：行进入 `list_signal` 后，数据一变就会整行重建（丢失悬停、
+/// 菜单锚点、开关动画）；这些高频数据改用每条规则一组文案信号绑定，行就不会因它们而重建。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Metrics {
+    /// 当前连接数；规则没在运行或没有该数据时为 `None`
+    pub clients: Option<usize>,
+    /// 串口累计接收 / 发送字节数
+    pub traffic: Option<(u64, u64)>,
+}
+
+impl Metrics {
+    /// `2 个连接`，没有数据时 `—`
+    pub fn conns_text(&self) -> String {
+        self.clients.map_or_else(|| "—".into(), |n| format!("{n} 个连接"))
+    }
+
+    pub fn clients_text(&self) -> String {
+        self.clients.unwrap_or(0).to_string()
+    }
+
+    /// `↓ 27.3 MB ↑ 9.0 KB`，没有数据时 `—`
+    pub fn traffic_text(&self) -> String {
+        self.traffic
+            .map_or_else(|| "—".into(), |(rx, tx)| format!("↓ {} ↑ {}", human_bytes(rx), human_bytes(tx)))
+    }
+
+    pub fn rx_text(&self) -> String {
+        self.traffic.map_or_else(|| "—".into(), |(rx, _)| human_bytes(rx))
+    }
+
+    pub fn tx_text(&self) -> String {
+        self.traffic.map_or_else(|| "—".into(), |(_, tx)| human_bytes(tx))
+    }
 }
 
 /// 概览页统计卡片。
@@ -97,7 +132,7 @@ fn encoding_name(e: Encoding) -> &'static str {
 }
 
 /// 把配置里的每条规则对上它的运行状态，生成表格行（顺序与配置一致）。
-pub fn build_rows(config: &Config, statuses: &[ForwardStatus], snapshots: &[PortSnapshot]) -> Vec<RuleRow> {
+pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
     config
         .rules
         .iter()
@@ -107,7 +142,6 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus], snapshots: &[Port
                 .find(|s| s.name == rule.name() && s.rule_type == rule_type(rule));
             let mut row = match rule {
                 ForwardRule::Serial(r) => {
-                    let snap = snapshots.iter().find(|s| s.name == r.name);
                     let target = r
                         .com
                         .clone()
@@ -127,9 +161,6 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus], snapshots: &[Port
                         name: r.name.clone(),
                         path: format!("{com} · {} → :{}", r.baud, r.tcp_port),
                         sub: format!("{} · {}", mode_name(r.mode), encoding_name(r.encoding)),
-                        traffic: snap
-                            .map(|s| format!("↓ {} ↑ {}", human_bytes(s.rx_bytes), human_bytes(s.tx_bytes)))
-                            .unwrap_or_else(|| "—".into()),
                         ..blank(Kind::Serial, &r.name, r.enabled)
                     }
                 }
@@ -181,12 +212,40 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus], snapshots: &[Port
                     row.status = text;
                     row.tone = tone;
                     row.detail = s.detail.clone();
-                    if row.kind != Kind::Ssh && s.state == State::Running {
-                        row.conns = format!("{} 个连接", s.clients);
-                    }
                 }
             }
             row
+        })
+        .collect()
+}
+
+/// 每条规则当前的连接数和流量（见 [`Metrics`]）；键是规则名。
+///
+/// 连接数只有「已启用且在运行」的串口 / TCP 规则才有；流量只有串口有，来自串口快照。
+pub fn build_metrics(
+    config: &Config,
+    statuses: &[ForwardStatus],
+    snapshots: &[PortSnapshot],
+) -> HashMap<String, Metrics> {
+    config
+        .rules
+        .iter()
+        .map(|rule| {
+            let status = statuses
+                .iter()
+                .find(|s| s.name == rule.name() && s.rule_type == rule_type(rule));
+            let clients = match (rule, status) {
+                (ForwardRule::Ssh(_), _) | (_, None) => None,
+                (_, Some(s)) => (rule.enabled() && s.state == State::Running).then_some(s.clients),
+            };
+            let traffic = match rule {
+                ForwardRule::Serial(r) => snapshots
+                    .iter()
+                    .find(|s| s.name == r.name)
+                    .map(|s| (s.rx_bytes, s.tx_bytes)),
+                _ => None,
+            };
+            (rule.name().to_string(), Metrics { clients, traffic })
         })
         .collect()
 }
@@ -208,8 +267,6 @@ fn blank(kind: Kind, name: &str, enabled: bool) -> RuleRow {
         status: String::new(),
         tone: Tone::Off,
         detail: String::new(),
-        conns: "—".into(),
-        traffic: "—".into(),
         enabled,
         tag: String::new(),
         from: String::new(),
@@ -232,7 +289,7 @@ fn state_text(kind: Kind, s: &ForwardStatus) -> (String, Tone) {
     }
 }
 
-pub fn stats(rows: &[RuleRow]) -> Stats {
+pub fn stats(rows: &[RuleRow], metrics: &HashMap<String, Metrics>) -> Stats {
     let kind_stat = |kind: Kind| {
         let mine: Vec<&RuleRow> = rows.iter().filter(|r| r.kind == kind).collect();
         let online = mine.iter().filter(|r| r.tone == Tone::Ok).count();
@@ -258,7 +315,7 @@ pub fn stats(rows: &[RuleRow]) -> Stats {
     let connections = rows
         .iter()
         .filter(|r| r.kind != Kind::Ssh)
-        .filter_map(|r| r.conns.split(' ').next()?.parse::<usize>().ok())
+        .filter_map(|r| metrics.get(&r.name)?.clients)
         .sum();
     Stats {
         serial: kind_stat(Kind::Serial),
@@ -290,26 +347,11 @@ pub struct SerialDetail {
     pub encoding: &'static str,
     pub scope: String,
     pub tcp_port: u16,
-    pub clients: usize,
-    pub rx: String,
-    pub tx: String,
 }
 
 /// 选中的串口详情；`bind` 是服务监听地址，决定"局域网 / 仅本机"。
-pub fn serial_detail(config: &Config, rows: &[RuleRow], selected: &str) -> Option<SerialDetail> {
+pub fn serial_detail(config: &Config, selected: &str) -> Option<SerialDetail> {
     let rule = config.serial_rules().find(|r| r.name == selected)?;
-    let row = rows.iter().find(|r| r.kind == Kind::Serial && r.name == selected);
-    let clients = row
-        .and_then(|r| r.conns.split(' ').next()?.parse().ok())
-        .unwrap_or(0);
-    let (rx, tx) = match row.map(|r| r.traffic.as_str()) {
-        Some(t) if t.starts_with('↓') => {
-            let t = t.trim_start_matches('↓').trim();
-            let mut it = t.split(" ↑ ");
-            (it.next().unwrap_or("—").to_string(), it.next().unwrap_or("—").to_string())
-        }
-        _ => ("—".into(), "—".into()),
-    };
     let bind = &config.server.bind;
     let scope = if bind == "127.0.0.1" || bind == "localhost" || bind == "::1" {
         format!("仅本机 {bind}")
@@ -328,9 +370,6 @@ pub fn serial_detail(config: &Config, rows: &[RuleRow], selected: &str) -> Optio
         encoding: encoding_name(rule.encoding),
         scope,
         tcp_port: rule.tcp_port,
-        clients,
-        rx,
-        tx,
     })
 }
 
@@ -444,16 +483,48 @@ mod tests {
             status("A1", RuleType::Serial, State::Running, "已连接 COM7 @ 1500000", 2),
             status("gitlab", RuleType::Ssh, State::Starting, "连接中断，4 秒后重连：timeout", 0),
         ];
-        let rows = build_rows(&config(), &statuses, &[]);
+        let rows = build_rows(&config(), &statuses);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].path, "COM7 · 1500000 → :7001", "已连接时显示实际 COM 号");
         assert_eq!(rows[0].status, "已连接");
-        assert_eq!(rows[0].conns, "2 个连接");
         assert_eq!(rows[1].status, "重连中");
-        assert_eq!(rows[1].conns, "—");
         assert_eq!(rows[1].path, "127.0.0.1:8443 → gitlab.internal:443");
         assert_eq!(rows[2].status, "已停用");
         assert!(!rows[2].enabled);
+    }
+
+    fn snapshot(name: &str, rx: u64, tx: u64) -> PortSnapshot {
+        use porttool_core::port::PortState;
+        PortSnapshot {
+            name: name.into(),
+            state: PortState::Waiting,
+            baud: 1_500_000,
+            tcp_port: 7001,
+            mode: TerminalMode::Telnet,
+            clients: 2,
+            last_seq: 0,
+            rx_bytes: rx,
+            tx_bytes: tx,
+        }
+    }
+
+    #[test]
+    fn metrics_hold_connections_and_traffic_apart_from_rows() {
+        let statuses = vec![
+            status("A1", RuleType::Serial, State::Running, "已连接 COM7 @ 1500000", 2),
+            status("gitlab", RuleType::Ssh, State::Running, "运行中", 0),
+        ];
+        let metrics = build_metrics(&config(), &statuses, &[snapshot("A1", 3 * 1_048_576, 2048)]);
+        assert_eq!(metrics["A1"].conns_text(), "2 个连接");
+        assert_eq!(metrics["A1"].traffic_text(), "↓ 3.0 MB ↑ 2.0 KB");
+        assert_eq!((metrics["A1"].rx_text(), metrics["A1"].tx_text()), ("3.0 MB".into(), "2.0 KB".into()));
+        assert_eq!(metrics["gitlab"].conns_text(), "—", "SSH 没有连接数");
+        assert_eq!(metrics["mqtt"], Metrics::default(), "已停用的规则没有数据");
+        assert_eq!(metrics["mqtt"].traffic_text(), "—");
+
+        // 流量变了只体现在 Metrics 上；build_rows 根本不接收快照，行不会受影响
+        let metrics_b = build_metrics(&config(), &statuses, &[snapshot("A1", 9, 9)]);
+        assert_ne!(metrics["A1"], metrics_b["A1"]);
     }
 
     #[test]
@@ -462,8 +533,9 @@ mod tests {
             status("A1", RuleType::Serial, State::Running, "已连接 COM5 @ 1", 2),
             status("gitlab", RuleType::Ssh, State::Failed, "Permission denied", 0),
         ];
-        let rows = build_rows(&config(), &statuses, &[]);
-        let st = stats(&rows);
+        let rows = build_rows(&config(), &statuses);
+        let metrics = build_metrics(&config(), &statuses, &[]);
+        let st = stats(&rows, &metrics);
         assert_eq!((st.serial.online, st.serial.total), (1, 1));
         assert_eq!(st.serial.note, "全部正常");
         assert_eq!(st.ssh.tone, Tone::Bad);
@@ -476,7 +548,7 @@ mod tests {
 
     #[test]
     fn filter_by_kind_and_query() {
-        let rows = build_rows(&config(), &[], &[]);
+        let rows = build_rows(&config(), &[]);
         assert_eq!(filter_rows(&rows, None, "").len(), 3);
         assert_eq!(filter_rows(&rows, Some(Kind::Ssh), "").len(), 1);
         assert_eq!(filter_rows(&rows, None, "GITLAB").len(), 1);

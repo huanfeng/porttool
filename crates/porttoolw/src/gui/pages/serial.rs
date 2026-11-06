@@ -47,7 +47,7 @@ pub fn view(gui: &Gui) -> Element {
 }
 
 fn card(gui: &Gui, r: RuleRow) -> Element {
-    let middle = vec![mono(r.path.clone()), super::sub_line(&r)];
+    let middle = vec![mono(r.path.clone()), super::sub_line(gui, &r)];
     super::rule_card(gui, &r, middle, Some(gui.selected_serial))
 }
 
@@ -74,7 +74,8 @@ fn detail_panel(gui: &Gui, d: SerialDetail) -> Element {
             gui.editors.open(&gui, Kind::Serial, Some(name.clone()))
         })
     };
-    let param = |k: &str, v: String| {
+    let metrics = gui.metric_signals(&d.name);
+    let param = |k: &str, v: TextContent| {
         Element::row()
             .width_match()
             .padding_xy(0, 6)
@@ -116,14 +117,18 @@ fn detail_panel(gui: &Gui, d: SerialDetail) -> Element {
                     .child(copy),
             )
             .child(section("参数"))
-            .child(param("设备", d.device))
-            .child(param("波特率", d.baud.to_string()))
-            .child(param("终端模式", d.mode.to_string()))
-            .child(param("编码", d.encoding.to_string()))
-            .child(param("监听范围", d.scope))
-            .child(section(&format!("已连接终端 · {}", d.clients)))
-            .child(param("接收", d.rx))
-            .child(param("发送", d.tx))
+            .child(param("设备", d.device.into()))
+            .child(param("波特率", d.baud.to_string().into()))
+            .child(param("终端模式", d.mode.to_string().into()))
+            .child(param("编码", d.encoding.to_string().into()))
+            .child(param("监听范围", d.scope.into()))
+            .child(
+                Element::hstack()
+                    .child(section("已连接终端 · "))
+                    .child(Element::label(metrics.clients).font_weight(700).padding_xy(0, 4)),
+            )
+            .child(param("接收", metrics.rx.into()))
+            .child(param("发送", metrics.tx.into()))
             .child(
                 Element::label("单个终端的明细与断开功能暂未提供。")
                     .fg_role(Role::TextSubtle)

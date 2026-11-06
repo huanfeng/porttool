@@ -163,6 +163,7 @@ fn head_cell(text: &str, weight: f32) -> Element {
 
 /// 一行规则；TCP 页也复用它。
 pub fn data_row(gui: &Gui, r: RuleRow) -> Element {
+    let metrics = gui.metric_signals(&r.name);
     Element::row()
         .width_match()
         .cross(Align::Center)
@@ -190,8 +191,8 @@ pub fn data_row(gui: &Gui, r: RuleRow) -> Element {
             Element::col()
                 .weight(W_CONN)
                 .spacing(2)
-                .child(Element::label(r.conns.clone()))
-                .child(Element::label(r.traffic.clone()).fg_role(Role::TextMuted).font_size(12.0)),
+                .child(Element::label(metrics.conns))
+                .child(Element::label(metrics.traffic).fg_role(Role::TextMuted).font_size(12.0)),
         )
         .child(
             Element::hstack()

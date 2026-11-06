@@ -28,6 +28,40 @@ use model::{Kind, RuleRow, Stats};
 /// 单实例标识，`main` 里的提前仲裁与 `App::single_instance` 必须一致。
 pub const APP_ID: &str = "porttool";
 
+/// 一条规则的实时数据文案（连接数、流量），行内标签直接绑定这些信号。
+/// 刷新时只改这些信号，规则行（`RuleRow`）不变就不会被 `list_signal` 重建。
+#[derive(Clone, Copy)]
+pub struct MetricSignals {
+    /// `2 个连接` / `—`
+    pub conns: Signal<String>,
+    /// `↓ 27.3 MB ↑ 9.0 KB` / `—`
+    pub traffic: Signal<String>,
+    /// 串口详情用：接收 / 发送字节数、连接数
+    pub rx: Signal<String>,
+    pub tx: Signal<String>,
+    pub clients: Signal<String>,
+}
+
+impl MetricSignals {
+    fn new() -> Self {
+        let dash = || signal(String::from("—"));
+        Self { conns: dash(), traffic: dash(), rx: dash(), tx: dash(), clients: signal(String::from("0")) }
+    }
+
+    fn apply(&self, m: &model::Metrics) {
+        let set = |sig: Signal<String>, text: String| {
+            if sig.with(|t| *t != text) {
+                sig.set(text);
+            }
+        };
+        set(self.conns, m.conns_text());
+        set(self.traffic, m.traffic_text());
+        set(self.rx, m.rx_text());
+        set(self.tx, m.tx_text());
+        set(self.clients, m.clients_text());
+    }
+}
+
 /// 一条规则的启用开关。概览页和类型页各有一个开关控件，但都绑定同一个信号，所以两处联动；
 /// 用户拨动后由 `Gui::poll_inputs` 通过 `version()` 发现变化并写回配置。
 struct SwitchEntry {
@@ -79,6 +113,8 @@ pub struct Gui {
     theme: Rc<RefCell<Option<ThemeHandle>>>,
     /// 规则名 → 启用开关（跨页面共享）。信号不放进行作用域，行重建后仍然有效
     switches: Rc<RefCell<HashMap<String, SwitchEntry>>>,
+    /// 规则名 → 实时数据信号；同样建在行作用域之外
+    metrics: Rc<RefCell<HashMap<String, MetricSignals>>>,
     editors: editors::Editors,
 }
 
@@ -208,6 +244,7 @@ impl Gui {
             theme_mode: signal(2),
             theme: Rc::new(RefCell::new(None)),
             switches: Rc::new(RefCell::new(HashMap::new())),
+            metrics: Rc::new(RefCell::new(HashMap::new())),
             editors: editors::Editors::new(),
             detail_seen: Rc::new(Cell::new(0)),
         };
@@ -221,13 +258,18 @@ impl Gui {
         let config = self.service.config();
         let statuses = self.runtime.block_on(self.service.list_rules());
         let snapshots = self.service.snapshots();
-        let rows = model::build_rows(&config, &statuses, &snapshots);
+        let rows = model::build_rows(&config, &statuses);
+        let metrics = model::build_metrics(&config, &statuses, &snapshots);
 
-        // 先把开关信号对齐到配置，行（在 rows 变化后）重建时才能取到
+        // 先把开关和实时数据信号建好 / 对齐，行（在 rows 变化后）重建时才能取到
         self.sync_switches(&rows);
+        self.sync_metrics(&rows, &metrics);
+        let stats = model::stats(&rows, &metrics);
+        if self.stats.with(|s| s.first() != Some(&stats)) {
+            self.stats.set(vec![stats]);
+        }
         if self.rows.with(|r| *r != rows) {
             self.rows.set(rows.clone());
-            self.stats.set(vec![model::stats(&rows)]);
             self.alerts.set(model::failures(&rows).into_iter().cloned().collect());
             for (i, kind) in [Kind::Serial, Kind::Ssh, Kind::Tcp].into_iter().enumerate() {
                 let n = rows.iter().filter(|r| r.kind == kind).count();
@@ -281,11 +323,7 @@ impl Gui {
         self.detail_seen.set(self.selected_serial.version());
         let selected = self.selected_serial.get();
         let config = self.service.config();
-        let detail: Vec<_> = self
-            .rows
-            .with(|rows| model::serial_detail(&config, rows, &selected))
-            .into_iter()
-            .collect();
+        let detail: Vec<_> = model::serial_detail(&config, &selected).into_iter().collect();
         if self.serial_detail.with(|d| *d != detail) {
             self.serial_detail.set(detail);
         }
@@ -302,6 +340,27 @@ impl Gui {
         let shown = self.rows.with(|rows| model::filter_rows(rows, kind, &query));
         if self.shown.with(|s| *s != shown) {
             self.shown.set(shown);
+        }
+    }
+
+    /// 取规则的实时数据信号；各页面的标签都绑定它。
+    pub fn metric_signals(&self, name: &str) -> MetricSignals {
+        let mut map = self.metrics.borrow_mut();
+        match map.get(name) {
+            Some(m) if m.conns.is_alive() => *m,
+            _ => {
+                let m = MetricSignals::new();
+                map.insert(name.to_string(), m);
+                m
+            }
+        }
+    }
+
+    /// 把最新的连接数 / 流量写进各规则的信号（没变的不写）。
+    fn sync_metrics(&self, rows: &[RuleRow], metrics: &HashMap<String, model::Metrics>) {
+        let default = model::Metrics::default();
+        for r in rows {
+            self.metric_signals(&r.name).apply(metrics.get(&r.name).unwrap_or(&default));
         }
     }
 
@@ -551,11 +610,11 @@ pub(super) mod tests {
     use super::*;
     use porttool_core::config::TcpRule;
 
-    fn tcp(name: &str, listen: &str) -> ForwardRule {
+    fn tcp(name: &str, listen: &str, target: &str) -> ForwardRule {
         ForwardRule::Tcp(TcpRule {
             name: name.into(),
             listen: listen.into(),
-            target: "127.0.0.1:9".into(),
+            target: target.into(),
             max_connections: 10,
             enabled: true,
         })
@@ -567,6 +626,10 @@ pub(super) mod tests {
     }
 
     pub(super) fn setup(dir: &std::path::Path) -> (tokio::runtime::Runtime, Gui) {
+        setup_target(dir, "127.0.0.1:9")
+    }
+
+    fn setup_target(dir: &std::path::Path, target: &str) -> (tokio::runtime::Runtime, Gui) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let path = dir.join("config.toml");
         let mut config = Config::default();
@@ -575,7 +638,7 @@ pub(super) mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        config.rules.push(tcp("web", &free_addr()));
+        config.rules.push(tcp("web", &free_addr(), target));
         config.save(&path).unwrap();
         let service = runtime.block_on(Service::start(config, path, |_| {})).unwrap();
         let gui = Gui::new(service, runtime.handle().clone(), None);
@@ -686,6 +749,55 @@ pub(super) mod tests {
         gui.query.set("WEB".into());
         gui.poll_inputs();
         assert_eq!(gui.shown.with(|s| s.len()), 1);
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn metrics_change_does_not_rebuild_rows_but_status_change_does() {
+        // 目标是一个只接受连接、不回数据的服务，这样转发连接会一直保持
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = target.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let mut keep = Vec::new();
+            for stream in target.incoming() {
+                match stream {
+                    Ok(s) => keep.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup_target(dir.path(), &target_addr);
+        gui.refresh();
+        let conns = gui.metric_signals("web").conns;
+        assert_eq!(conns.get(), "0 个连接");
+        let rows_version = gui.rows.version();
+
+        // 连进转发端口：连接数变了，但规则行的结构性数据没变
+        let listen = match &gui.service.config().rules[0] {
+            ForwardRule::Tcp(r) => r.listen.clone(),
+            _ => unreachable!(),
+        };
+        let _client = std::net::TcpStream::connect(&listen).unwrap();
+        let mut seen = false;
+        for _ in 0..40 {
+            gui.refresh();
+            if conns.get() == "1 个连接" {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(seen, "连接数应更新到信号：{}", conns.get());
+        assert_eq!(gui.rows.version(), rows_version, "只有连接数 / 流量变化时不应重建规则行");
+
+        // 状态变化（停用）才会让行变化
+        runtime.block_on(gui.service.clone().set_enabled("web", false)).unwrap();
+        gui.refresh();
+        assert_ne!(gui.rows.version(), rows_version, "状态变化应更新规则行");
+        assert_eq!(gui.rows.with(|r| r[0].status.clone()), "已停用");
+        assert_eq!(conns.get(), "—", "停用后没有连接数");
         runtime.block_on(gui.service.shutdown());
     }
 }
