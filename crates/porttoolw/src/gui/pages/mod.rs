@@ -17,11 +17,9 @@ pub fn page_body() -> Element {
     Element::col().fill().padding(24).spacing(16)
 }
 
-/// 行内启用开关。开关的变化由 `Gui::poll_inputs` 写回配置。
+/// 行内启用开关：绑定规则共享的开关信号（各页面联动），变化由 `Gui::poll_inputs` 写回配置。
 pub fn row_actions_without_more(gui: &Gui, row: &RuleRow) -> Element {
-    let on = signal(row.enabled);
-    gui.register_toggle(&row.name, on);
-    Element::switch(on)
+    Element::switch(gui.rule_switch(&row.name))
 }
 
 /// 行末的「开关 + 更多」。

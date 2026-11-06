@@ -11,6 +11,7 @@ mod shell;
 mod ui;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,11 +28,14 @@ use model::{Kind, RuleRow, Stats};
 /// 单实例标识，`main` 里的提前仲裁与 `App::single_instance` 必须一致。
 pub const APP_ID: &str = "porttool";
 
-/// 行内开关：信号值与配置里的 `enabled` 不一致时，写回配置。
-struct Toggle {
-    name: String,
+/// 一条规则的启用开关。概览页和类型页各有一个开关控件，但都绑定同一个信号，所以两处联动；
+/// 用户拨动后由 `Gui::poll_inputs` 通过 `version()` 发现变化并写回配置。
+struct SwitchEntry {
     state: Signal<bool>,
-    applied: bool,
+    /// 已经处理过的信号版本：版本变了说明有人拨动（或被我们自己对齐）
+    seen: u64,
+    /// 配置里当前的 enabled（最近一次确认的值）
+    last: bool,
 }
 
 #[derive(Clone)]
@@ -46,7 +50,8 @@ pub struct Gui {
     by_kind: [Signal<Vec<RuleRow>>; 3],
     /// 串口页右侧的详情（0 或 1 个元素）
     serial_detail: Signal<Vec<model::SerialDetail>>,
-    last_selected: Rc<RefCell<String>>,
+    /// 串口详情已按哪个版本的选中信号计算过
+    detail_seen: Rc<Cell<u64>>,
     /// 单元素向量：概览统计卡片据此重建
     stats: Signal<Vec<Stats>>,
     /// 失败的规则：告警条据此显示
@@ -61,7 +66,8 @@ pub struct Gui {
     /// 概览筛选：0 全部、1 串口、2 SSH、3 TCP
     filter: Signal<usize>,
     query: Signal<String>,
-    filter_key: Rc<RefCell<(usize, String)>>,
+    /// 概览表格已按哪个版本的（筛选, 搜索）计算过
+    filter_seen: Rc<Cell<(u64, u64)>>,
     /// 串口页选中的规则名
     selected_serial: Signal<String>,
     autostart: Signal<bool>,
@@ -71,7 +77,8 @@ pub struct Gui {
     /// 主题：0 亮色、1 暗色、2 跟随系统
     theme_mode: Signal<usize>,
     theme: Rc<RefCell<Option<ThemeHandle>>>,
-    toggles: Rc<RefCell<Vec<Toggle>>>,
+    /// 规则名 → 启用开关（跨页面共享）。信号不放进行作用域，行重建后仍然有效
+    switches: Rc<RefCell<HashMap<String, SwitchEntry>>>,
     editors: editors::Editors,
 }
 
@@ -118,7 +125,9 @@ pub fn run(
             if pending_open.replace(false) {
                 ctx.open_window(gui.main_window());
             }
-            gui.poll_inputs();
+            for error in gui.poll_inputs() {
+                ctx.toast_err(error);
+            }
             ticks.set(ticks.get().wrapping_add(1));
             if !ticks.get().is_multiple_of(2) {
                 return;
@@ -176,14 +185,13 @@ fn tray_menu(gui: &Gui) -> Vec<TrayMenuItem> {
 
 impl Gui {
     fn new(service: Arc<Service>, runtime: tokio::runtime::Handle, load_error: Option<String>) -> Self {
-        Gui {
+        let gui = Gui {
             service,
             runtime,
             rows: signal(Vec::new()),
             shown: signal(Vec::new()),
             by_kind: [signal(Vec::new()), signal(Vec::new()), signal(Vec::new())],
             serial_detail: signal(Vec::new()),
-            last_selected: Rc::new(RefCell::new(String::new())),
             stats: signal(Vec::new()),
             alerts: signal(Vec::new()),
             summary: signal(String::new()),
@@ -192,16 +200,20 @@ impl Gui {
             page: signal(0),
             filter: signal(0),
             query: signal(String::new()),
-            filter_key: Rc::new(RefCell::new((0, String::new()))),
+            filter_seen: Rc::new(Cell::new((0, 0))),
             selected_serial: signal(String::new()),
             autostart: signal(autostart::is_enabled()),
             load_error: signal(load_error.unwrap_or_default()),
             http_url: signal(String::new()),
             theme_mode: signal(2),
             theme: Rc::new(RefCell::new(None)),
-            toggles: Rc::new(RefCell::new(Vec::new())),
+            switches: Rc::new(RefCell::new(HashMap::new())),
             editors: editors::Editors::new(),
-        }
+            detail_seen: Rc::new(Cell::new(0)),
+        };
+        gui.filter_seen.set((gui.filter.version(), gui.query.version()));
+        gui.detail_seen.set(gui.selected_serial.version());
+        gui
     }
 
     /// 读取服务状态刷新所有视图信号；返回（托盘提示文字，是否有规则在线）。
@@ -211,6 +223,8 @@ impl Gui {
         let snapshots = self.service.snapshots();
         let rows = model::build_rows(&config, &statuses, &snapshots);
 
+        // 先把开关信号对齐到配置，行（在 rows 变化后）重建时才能取到
+        self.sync_switches(&rows);
         if self.rows.with(|r| *r != rows) {
             self.rows.set(rows.clone());
             self.stats.set(vec![model::stats(&rows)]);
@@ -249,23 +263,23 @@ impl Gui {
         (format!("PortTool — {online}/{} 条规则在线", rows.len()), online > 0)
     }
 
-    /// 输入类状态（筛选、搜索框、行内开关）没有变化回调，由定时器轮询。
-    fn poll_inputs(&self) {
-        let key = (self.filter.get(), self.query.get());
-        if *self.filter_key.borrow() != key {
-            *self.filter_key.borrow_mut() = key;
+    /// 输入类状态（筛选、搜索框、选中项、行内开关）没有变化回调，由定时器轮询，
+    /// 用信号的 `version()` 判断有没有变化。返回需要提示用户的错误（开关写回失败）。
+    fn poll_inputs(&self) -> Vec<String> {
+        let key = (self.filter.version(), self.query.version());
+        if self.filter_seen.get() != key {
+            self.filter_seen.set(key);
             self.recompute_shown();
         }
-        let selected = self.selected_serial.get();
-        if *self.last_selected.borrow() != selected {
+        if self.detail_seen.get() != self.selected_serial.version() {
             self.recompute_detail();
         }
-        self.apply_toggles();
+        self.apply_switches()
     }
 
     fn recompute_detail(&self) {
+        self.detail_seen.set(self.selected_serial.version());
         let selected = self.selected_serial.get();
-        *self.last_selected.borrow_mut() = selected.clone();
         let config = self.service.config();
         let detail: Vec<_> = self
             .rows
@@ -291,34 +305,83 @@ impl Gui {
         }
     }
 
-    /// 登记一个行内开关，由 `apply_toggles` 负责把变化写回配置。
-    fn register_toggle(&self, name: &str, state: Signal<bool>) {
-        let mut toggles = self.toggles.borrow_mut();
-        toggles.retain(|t| t.state.is_alive() && t.name != name);
-        toggles.push(Toggle { name: name.to_string(), state, applied: state.get() });
+    /// 取规则的启用开关信号；各页面的开关控件都绑定它。
+    ///
+    /// 信号在 `refresh` 里创建（行作用域之外），这样行重建不会让它失效。
+    pub fn rule_switch(&self, name: &str) -> Signal<bool> {
+        let mut map = self.switches.borrow_mut();
+        match map.get(name) {
+            Some(e) if e.state.is_alive() => e.state,
+            _ => {
+                // 正常情况下 refresh 已经建好；兜底
+                let state = signal(true);
+                map.insert(name.to_string(), SwitchEntry { state, seen: state.version(), last: true });
+                state
+            }
+        }
     }
 
-    fn apply_toggles(&self) {
+    /// 让每条规则都有一个开关信号，并在配置变了（命令行 / 重新加载等）时把信号对齐到配置。
+    ///
+    /// 已删除规则的信号不回收：删除行会先播离场动画，期间它还在读信号；一个布尔值的开销可以忽略。
+    fn sync_switches(&self, rows: &[RuleRow]) {
+        let mut map = self.switches.borrow_mut();
+        for r in rows {
+            match map.get_mut(&r.name) {
+                Some(e) if e.state.is_alive() => {
+                    if e.last != r.enabled {
+                        e.state.set(r.enabled);
+                        e.last = r.enabled;
+                        e.seen = e.state.version();
+                    }
+                }
+                _ => {
+                    let state = signal(r.enabled);
+                    map.insert(r.name.clone(), SwitchEntry { state, seen: state.version(), last: r.enabled });
+                }
+            }
+        }
+    }
+
+    /// 把被拨动的开关写回配置。写回失败时开关还原，并返回错误文字供界面提示。
+    fn apply_switches(&self) -> Vec<String> {
         let pending: Vec<(String, bool)> = {
-            let mut toggles = self.toggles.borrow_mut();
-            toggles.retain(|t| t.state.is_alive());
-            toggles
-                .iter_mut()
-                .filter_map(|t| {
-                    let want = t.state.try_get()?;
-                    (want != t.applied).then(|| {
-                        t.applied = want;
-                        (t.name.clone(), want)
-                    })
+            let mut map = self.switches.borrow_mut();
+            map.iter_mut()
+                .filter_map(|(name, e)| {
+                    if !e.state.is_alive() {
+                        return None;
+                    }
+                    let version = e.state.version();
+                    if version == e.seen {
+                        return None;
+                    }
+                    e.seen = version;
+                    let want = e.state.try_get()?;
+                    (want != e.last).then(|| (name.clone(), want))
                 })
                 .collect()
         };
-        for (name, enabled) in pending {
-            if let Err(e) = self.set_enabled(&name, enabled) {
-                tracing::warn!("切换规则 {name} 失败: {e}");
-                self.refresh();
+        let mut errors = Vec::new();
+        for (name, want) in pending {
+            match self.set_enabled(&name, want) {
+                Ok(()) => {
+                    if let Some(e) = self.switches.borrow_mut().get_mut(&name) {
+                        e.last = want;
+                        e.seen = e.state.version();
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("切换规则 {name} 失败: {err}");
+                    if let Some(e) = self.switches.borrow_mut().get_mut(&name) {
+                        e.state.set(e.last);
+                        e.seen = e.state.version();
+                    }
+                    errors.push(format!("{name}：{err}"));
+                }
             }
         }
+        errors
     }
 
     /// 启用 / 停用一条规则并保存配置。
@@ -540,16 +603,64 @@ pub(super) mod tests {
         runtime.block_on(gui.service.shutdown());
     }
 
+    fn web_enabled(gui: &Gui) -> bool {
+        Config::load(gui.service.config_path()).unwrap().rules[0].enabled()
+    }
+
     #[test]
-    fn polled_switch_writes_back_to_config() {
+    fn switch_toggled_on_any_page_writes_back_and_stays_in_sync() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, gui) = setup(dir.path());
         gui.refresh();
-        let on = signal(true);
-        gui.register_toggle("web", on);
-        on.set(false);
-        gui.poll_inputs();
-        assert!(!Config::load(gui.service.config_path()).unwrap().rules[0].enabled());
+        // 概览页和类型页各为同一规则取一个开关：必须是同一个信号，联动并且都能写回
+        let overview = gui.rule_switch("web");
+        let kind_page = gui.rule_switch("web");
+        assert!(overview.get() && kind_page.get());
+
+        overview.set(false);
+        assert!(gui.poll_inputs().is_empty());
+        assert!(!web_enabled(&gui), "概览页的开关应写回配置");
+        assert!(!kind_page.get(), "另一页的开关应联动");
+
+        kind_page.set(true);
+        assert!(gui.poll_inputs().is_empty());
+        assert!(web_enabled(&gui), "类型页的开关也应写回配置");
+        assert!(overview.get());
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn switch_rolls_back_and_reports_when_save_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        gui.refresh();
+        gui.load_error.set("解析失败".into()); // 配置有误：禁止保存
+        let sw = gui.rule_switch("web");
+
+        sw.set(false);
+        let errors = gui.poll_inputs();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("web"), "{errors:?}");
+        assert!(sw.get(), "写回失败时开关应还原");
+        assert!(web_enabled(&gui), "配置不应被改动");
+        assert!(gui.poll_inputs().is_empty(), "还原不应被当成新的拨动而重复报错");
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn switch_follows_external_changes_without_writing_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        gui.refresh();
+        let sw = gui.rule_switch("web");
+
+        // 命令行 / HTTP 停用了这条规则：开关跟着变，而且不会又被当成用户拨动写回去
+        let service = gui.service.clone();
+        runtime.block_on(service.set_enabled("web", false)).unwrap();
+        gui.refresh();
+        assert!(!sw.get());
+        assert!(gui.poll_inputs().is_empty());
+        assert!(!web_enabled(&gui));
         runtime.block_on(gui.service.shutdown());
     }
 
