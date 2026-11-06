@@ -2,17 +2,10 @@
 
 use windui::prelude::*;
 
-use super::{page_body, row_actions};
-use crate::gui::model::{Kind, RuleRow, Stats, Tone};
-use crate::gui::ui::{kind_badge, mono, page_header, panel, status_pill, tone_role};
+use super::{list, page_body};
+use crate::gui::model::{self, Kind, Stats, Tone};
+use crate::gui::ui::{page_header, panel, tone_role};
 use crate::gui::Gui;
-
-// 表格各列的宽度权重（表头与数据行共用）。
-const W_NAME: f32 = 1.7;
-const W_PATH: f32 = 3.1;
-const W_STATUS: f32 = 1.3;
-const W_CONN: f32 = 1.5;
-const W_OPS: i32 = 112;
 
 pub fn view(gui: &Gui) -> Element {
     page_body()
@@ -87,7 +80,7 @@ fn alert_bar(gui: &Gui) -> Element {
         None => String::new(),
         Some(r) => {
             let more = if a.len() > 1 { format!("（另有 {} 条）", a.len() - 1) } else { String::new() };
-            let what = r.detail.lines().last().unwrap_or("").trim();
+            let what = model::explain_failure(r.kind, &r.detail);
             format!("⚠  {} 转发 {} 失败：{what}{more}", r.kind.label(), r.name)
         }
     });
@@ -131,20 +124,7 @@ fn table(gui: &Gui) -> Element {
         .child(Element::flex_spacer())
         .child(Element::segmented(vec!["全部", "串口", "SSH", "TCP"], gui.filter));
 
-    let header = Element::row()
-        .width_match()
-        .bg_role(Role::SurfaceAlt)
-        .padding_xy(16, 8)
-        .spacing(12)
-        .child(head_cell("名称", W_NAME))
-        .child(head_cell("路径", W_PATH))
-        .child(head_cell("状态", W_STATUS))
-        .child(head_cell("连接 / 流量", W_CONN))
-        .child(Element::label("操作").fg_role(Role::TextMuted).width(W_OPS).text_align(Align::End));
-
-    let g = gui.clone();
-    let rows = Element::list_signal(gui.shown, |r: &RuleRow| r.name.clone(), move |r: RuleRow| data_row(&g, r))
-        .weight(1.0);
+    let rows = list::rule_list(gui, gui.shown, true);
     let shown = gui.shown;
     let empty = Element::label("没有匹配的规则，点右上角「新建」添加。")
         .fg_role(Role::TextMuted)
@@ -157,48 +137,9 @@ fn table(gui: &Gui) -> Element {
             .width_match()
             .height_match()
             .child(toolbar)
-            .child(header)
+            .child(list::header("路径"))
             .child(empty)
             .child(rows),
     )
     .weight(1.0)
-}
-
-fn head_cell(text: &str, weight: f32) -> Element {
-    Element::label(text.to_string()).fg_role(Role::TextMuted).weight(weight)
-}
-
-/// 一行规则；TCP 页也复用它。
-pub fn data_row(gui: &Gui, r: RuleRow) -> Element {
-    let metrics = gui.metric_signals(&r.name);
-    Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .padding_xy(16, 10)
-        .spacing(12)
-        .child(
-            Element::hstack()
-                .weight(W_NAME)
-                .child(kind_badge(r.kind))
-                .child(Element::label(r.name.clone()).font_weight(600)),
-        )
-        .child(
-            Element::col()
-                .weight(W_PATH)
-                .spacing(2)
-                .child(mono(r.path.clone()))
-                .child(Element::label(r.sub.clone()).fg_role(Role::TextMuted).font_size(12.0)),
-        )
-        .child(
-            Element::col()
-                .weight(W_STATUS)
-                .child(status_pill(&r.status, r.tone).tooltip(r.detail.clone())),
-        )
-        .child(Element::col().weight(W_CONN).child(Element::label(metrics.activity).fg_role(Role::TextMuted)))
-        .child(
-            Element::hstack()
-                .width(W_OPS)
-                .child(Element::flex_spacer())
-                .child(row_actions(gui, &r)),
-        )
 }
