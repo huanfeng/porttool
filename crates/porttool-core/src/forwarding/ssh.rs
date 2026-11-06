@@ -21,6 +21,8 @@ type Spawner = Arc<dyn Fn(&SshRule) -> io::Result<Child> + Send + Sync>;
 struct Shared {
     state: State,
     detail: String,
+    /// 当前是第几次重连；0 表示不在重连
+    attempt: u32,
 }
 
 pub struct SshForwarder {
@@ -41,6 +43,7 @@ impl SshForwarder {
             shared: Arc::new(StdMutex::new(Shared {
                 state: State::Stopped,
                 detail: "未启动".into(),
+                attempt: 0,
             })),
             task: Mutex::new(None),
             spawner,
@@ -52,6 +55,16 @@ fn set_state(shared: &StdMutex<Shared>, state: State, detail: impl Into<String>)
     if let Ok(mut s) = shared.lock() {
         s.state = state;
         s.detail = detail.into();
+        s.attempt = 0;
+    }
+}
+
+/// 进入「重连」阶段：状态仍是 `Starting`，同时记下这是第几次重连。
+fn set_reconnecting(shared: &StdMutex<Shared>, attempt: u32, detail: impl Into<String>) {
+    if let Ok(mut s) = shared.lock() {
+        s.state = State::Starting;
+        s.detail = detail.into();
+        s.attempt = attempt;
     }
 }
 
@@ -214,17 +227,13 @@ async fn supervise(rule: SshRule, shared: Arc<StdMutex<Shared>>, spawner: Spawne
         }
         retries = retries.saturating_add(1);
         let delay = (1u64 << retries.min(5)).min(30);
-        set_state(
-            &shared,
-            State::Starting,
-            format!("连接中断，{delay} 秒后重连：{detail}"),
-        );
+        set_reconnecting(&shared, retries, format!("连接中断，{delay} 秒后重连：{detail}"));
         tokio::time::sleep(Duration::from_secs(delay)).await;
 
         match spawner(&rule) {
             Ok(c) => {
                 child = c;
-                set_state(&shared, State::Starting, "正在重连…");
+                set_reconnecting(&shared, retries, "正在重连…");
             }
             Err(e) => {
                 set_state(&shared, State::Failed, format!("重连失败：{e}"));
@@ -278,17 +287,19 @@ impl Forwarder for SshForwarder {
     }
 
     fn status(&self) -> ForwardStatus {
-        let (state, detail) = self
+        let (state, detail, attempt) = self
             .shared
             .lock()
-            .map(|s| (s.state, s.detail.clone()))
-            .unwrap_or((State::Failed, "状态不可用".into()));
+            .map(|s| (s.state, s.detail.clone(), s.attempt))
+            .unwrap_or((State::Failed, "状态不可用".into(), 0));
         ForwardStatus {
             name: self.rule.name.clone(),
             rule_type: RuleType::Ssh,
             state,
             detail,
             clients: 0,
+            endpoint: None,
+            attempt,
         }
     }
 
@@ -461,6 +472,7 @@ mod tests {
         f.start().await.unwrap();
         wait_state(&f, State::Running).await;
         assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(f.status().attempt, 0, "重连成功后不再处于重连");
         f.stop().await.unwrap();
     }
 
@@ -480,6 +492,7 @@ mod tests {
             detail = f.status().detail;
         }
         assert!(detail.contains("重连"), "{detail}");
+        assert_eq!(f.status().attempt, 1, "第一次退避应记为第 1 次重连");
         f.stop().await.unwrap();
         tokio::time::sleep(Duration::from_millis(2300)).await;
         assert_eq!(count.load(Ordering::SeqCst), 1, "停止后不应再拉起 ssh");

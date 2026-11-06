@@ -268,7 +268,10 @@ fn rules_table(rules: &[ForwardStatus]) -> String {
     for r in rules {
         let ty = format!("{:?}", r.rule_type).to_lowercase();
         let state = format!("{:?}", r.state).to_lowercase();
-        let detail = r.detail.replace('\n', " | ");
+        let mut detail = r.detail.replace('\n', " | ");
+        if r.attempt > 0 {
+            detail = format!("(第 {} 次重连) {detail}", r.attempt);
+        }
         let _ = writeln!(out, "{:<16} {:<7} {:<9} {:>7}  {}", r.name, ty, state, r.clients, detail);
     }
     out
@@ -586,6 +589,24 @@ fn wait_response(lines: &[LogLine], end: WaitEnd, params: &Params) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rules_table_shows_reconnect_attempt() {
+        use crate::forwarding::{RuleType, State};
+        let status = |attempt: u32| ForwardStatus {
+            name: "gitlab".into(),
+            rule_type: RuleType::Ssh,
+            state: State::Starting,
+            detail: "连接中断，4 秒后重连：timeout".into(),
+            clients: 0,
+            endpoint: None,
+            attempt,
+        };
+        assert!(rules_table(&[status(2)]).contains("(第 2 次重连) 连接中断"));
+        assert!(!rules_table(&[status(0)]).contains("次重连"));
+        let json = serde_json::to_string(&status(2)).unwrap();
+        assert!(json.contains("\"attempt\":2") && json.contains("\"endpoint\":null"), "{json}");
+    }
 
     #[test]
     fn host_allowlist() {

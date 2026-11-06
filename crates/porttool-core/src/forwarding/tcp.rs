@@ -210,6 +210,8 @@ impl Forwarder for TcpForwarder {
             state,
             detail,
             clients,
+            endpoint: None,
+            attempt: 0,
         }
     }
 

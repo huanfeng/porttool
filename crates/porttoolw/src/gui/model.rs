@@ -147,15 +147,8 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                         .clone()
                         .or_else(|| r.serial_number.as_ref().map(|sn| format!("SN {sn}")))
                         .unwrap_or_else(|| "—".into());
-                    let com = match status {
-                        Some(s) if s.state == State::Running => s
-                            .detail
-                            .strip_prefix("已连接 ")
-                            .and_then(|d| d.split(" @").next())
-                            .map(str::to_string)
-                            .unwrap_or(target),
-                        _ => target,
-                    };
+                    // 已连接时显示实际的 COM 号（序列号绑定的设备 COM 号可能变化）
+                    let com = status.and_then(|s| s.endpoint.clone()).unwrap_or(target);
                     RuleRow {
                         kind: Kind::Serial,
                         name: r.name.clone(),
@@ -280,7 +273,7 @@ fn state_text(kind: Kind, s: &ForwardStatus) -> (String, Tone) {
         (Kind::Serial, State::Running) => ("已连接".into(), Tone::Ok),
         (Kind::Serial, State::Starting) => ("等待设备".into(), Tone::Warn),
         (Kind::Ssh, State::Running) => ("运行中".into(), Tone::Ok),
-        (Kind::Ssh, State::Starting) if s.detail.contains("重连") => ("重连中".into(), Tone::Warn),
+        (Kind::Ssh, State::Starting) if s.attempt > 0 => (format!("重连中 第{}次", s.attempt), Tone::Warn),
         (Kind::Tcp, State::Running) => ("监听中".into(), Tone::Ok),
         (_, State::Starting) => ("连接中".into(), Tone::Warn),
         (Kind::Tcp, State::Failed) => ("监听失败".into(), Tone::Bad),
@@ -474,23 +467,49 @@ mod tests {
     }
 
     fn status(name: &str, rule_type: RuleType, state: State, detail: &str, clients: usize) -> ForwardStatus {
-        ForwardStatus { name: name.into(), rule_type, state, detail: detail.into(), clients }
+        ForwardStatus {
+            name: name.into(),
+            rule_type,
+            state,
+            detail: detail.into(),
+            clients,
+            endpoint: None,
+            attempt: 0,
+        }
     }
 
     #[test]
     fn rows_combine_config_and_status() {
         let statuses = vec![
-            status("A1", RuleType::Serial, State::Running, "已连接 COM7 @ 1500000", 2),
-            status("gitlab", RuleType::Ssh, State::Starting, "连接中断，4 秒后重连：timeout", 0),
+            ForwardStatus {
+                endpoint: Some("COM7".into()),
+                ..status("A1", RuleType::Serial, State::Running, "已连接 COM7 @ 1500000", 2)
+            },
+            ForwardStatus {
+                attempt: 2,
+                ..status("gitlab", RuleType::Ssh, State::Starting, "连接中断，4 秒后重连：timeout", 0)
+            },
         ];
         let rows = build_rows(&config(), &statuses);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].path, "COM7 · 1500000 → :7001", "已连接时显示实际 COM 号");
         assert_eq!(rows[0].status, "已连接");
-        assert_eq!(rows[1].status, "重连中");
+        assert_eq!(rows[1].status, "重连中 第2次", "重连次数来自结构化字段，不解析 detail 文字");
+        assert_eq!(rows[1].tone, Tone::Warn);
         assert_eq!(rows[1].path, "127.0.0.1:8443 → gitlab.internal:443");
         assert_eq!(rows[2].status, "已停用");
         assert!(!rows[2].enabled);
+    }
+
+    #[test]
+    fn reconnect_state_does_not_depend_on_detail_text() {
+        // 文字里带「重连」但 attempt 为 0：只是普通的「连接中」
+        let first = status("gitlab", RuleType::Ssh, State::Starting, "正在重连…", 0);
+        assert_eq!(state_text(Kind::Ssh, &first), ("连接中".to_string(), Tone::Warn));
+        // 串口没有 endpoint 时用配置里的设备
+        let serial = status("A1", RuleType::Serial, State::Starting, "已连接 COM9 @ 1", 0);
+        let rows = build_rows(&config(), &[serial]);
+        assert_eq!(rows[0].path, "COM5 · 1500000 → :7001", "COM 号只认 endpoint，不再解析 detail");
     }
 
     fn snapshot(name: &str, rx: u64, tx: u64) -> PortSnapshot {

@@ -116,6 +116,8 @@ impl Service {
                 state: State::Stopped,
                 detail: "已停用".into(),
                 clients: 0,
+                endpoint: None,
+                attempt: 0,
             });
         }
         out.sort_by(|a, b| {
@@ -309,10 +311,12 @@ impl Service {
 }
 
 fn serial_status(s: &PortSnapshot) -> ForwardStatus {
-    let (state, detail) = match &s.state {
-        PortState::Waiting => (State::Starting, "等待设备接入".to_string()),
-        PortState::Connected { com } => (State::Running, format!("已连接 {com} @ {}", s.baud)),
-        PortState::Error(e) => (State::Failed, e.clone()),
+    let (state, detail, endpoint) = match &s.state {
+        PortState::Waiting => (State::Starting, "等待设备接入".to_string(), None),
+        PortState::Connected { com } => {
+            (State::Running, format!("已连接 {com} @ {}", s.baud), Some(com.clone()))
+        }
+        PortState::Error(e) => (State::Failed, e.clone(), None),
     };
     ForwardStatus {
         name: s.name.clone(),
@@ -320,6 +324,8 @@ fn serial_status(s: &PortSnapshot) -> ForwardStatus {
         state,
         detail,
         clients: s.clients,
+        endpoint,
+        attempt: 0,
     }
 }
 
@@ -516,5 +522,25 @@ mod tests {
         assert!(service.set_enabled("web", false).await.is_err(), "配置文件损坏时不应覆盖它");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is = not [valid toml");
         service.shutdown().await;
+    }
+
+    #[test]
+    fn serial_status_carries_structured_endpoint() {
+        let snap = |state: PortState| PortSnapshot {
+            name: "esp32".into(),
+            state,
+            baud: 115_200,
+            tcp_port: 7001,
+            mode: TerminalMode::Telnet,
+            clients: 3,
+            last_seq: 0,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        let up = serial_status(&snap(PortState::Connected { com: "COM7".into() }));
+        assert_eq!((up.state, up.endpoint.as_deref(), up.clients), (State::Running, Some("COM7"), 3));
+        let waiting = serial_status(&snap(PortState::Waiting));
+        assert_eq!((waiting.state, waiting.endpoint), (State::Starting, None));
+        assert_eq!(waiting.attempt, 0);
     }
 }

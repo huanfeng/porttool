@@ -24,6 +24,10 @@ pub struct ForwardStatus {
     /// 客户端数量（仅串口有意义）
     #[serde(default)]
     pub clients: usize,
+    /// 串口当前连上的设备（COM 号）；其它类型为 `None`
+    pub endpoint: Option<String>,
+    /// SSH 当前是第几次重连（连续失败后的重试次数）；0 表示不在重连
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
