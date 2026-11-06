@@ -37,23 +37,19 @@ pub enum Tone {
 pub struct RuleRow {
     pub kind: Kind,
     pub name: String,
-    /// 路径主行，等宽字体，例如 `COM5 · 1500000 → :7001`
+    /// 路径，等宽字体单行显示，例如 `COM5 · 1500000 → telnet :7001`
     pub path: String,
-    /// 路径副行，例如 `telnet · utf-8`
+    /// 次要参数，例如 `telnet · utf-8`；不单独显示，只参与搜索
     pub sub: String,
     pub status: String,
     pub tone: Tone,
     /// 状态详情（失败原因、重连倒计时等）
     pub detail: String,
     pub enabled: bool,
-    /// SSH 规则的方向标签，例如 `本地 -L`
+    /// SSH 规则的方向标签：`-L`（本地转发）/ `-R`（远程转发）
     pub tag: String,
-    /// 三段流程：本机监听 → 中间 → 目标（SSH / TCP 规则用）
-    pub from: String,
-    pub via: String,
-    pub to: String,
-    /// 串口规则的终端端口（其它规则为 0）
-    pub port: u16,
+    /// SSH 当前是第几次重连；0 表示不在重连
+    pub attempt: u32,
 }
 
 /// 每次刷新都可能变化的数据（连接数、流量）。
@@ -69,27 +65,26 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// `2 个连接`，没有数据时 `—`
+    /// `2 个连接`，没有数据时为空
     pub fn conns_text(&self) -> String {
-        self.clients.map_or_else(|| "—".into(), |n| format!("{n} 个连接"))
+        self.clients.map(|n| format!("{n} 个连接")).unwrap_or_default()
     }
 
-    pub fn clients_text(&self) -> String {
-        self.clients.unwrap_or(0).to_string()
-    }
-
-    /// `↓ 27.3 MB ↑ 9.0 KB`，没有数据时 `—`
+    /// `↓ 27.3 MB ↑ 9.0 KB`；没有数据，或还一个字节都没收发时为空（`↓ 0 B ↑ 0 B` 没有信息量）
     pub fn traffic_text(&self) -> String {
         self.traffic
-            .map_or_else(|| "—".into(), |(rx, tx)| format!("↓ {} ↑ {}", human_bytes(rx), human_bytes(tx)))
+            .filter(|(rx, tx)| *rx > 0 || *tx > 0)
+            .map(|(rx, tx)| format!("↓ {} ↑ {}", human_bytes(rx), human_bytes(tx)))
+            .unwrap_or_default()
     }
 
-    pub fn rx_text(&self) -> String {
-        self.traffic.map_or_else(|| "—".into(), |(rx, _)| human_bytes(rx))
-    }
-
-    pub fn tx_text(&self) -> String {
-        self.traffic.map_or_else(|| "—".into(), |(_, tx)| human_bytes(tx))
+    /// 行里显示的活动摘要：`2 个连接 · ↓ 27.3 MB ↑ 9.0 KB`；两样都没有时为空（行里什么都不画）。
+    pub fn activity_text(&self) -> String {
+        [self.conns_text(), self.traffic_text()]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 }
 
@@ -154,49 +149,39 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                     RuleRow {
                         kind: Kind::Serial,
                         name: r.name.clone(),
-                        path: format!("{com} · {} → :{}", r.baud, r.tcp_port),
+                        path: format!("{com} · {} → {} :{}", r.baud, mode_name(r.mode), r.tcp_port),
                         sub: format!("{} · {}", mode_name(r.mode), encoding_name(r.encoding)),
-                        from: format!("{com} · {}", r.baud),
-                        via: mode_name(r.mode).to_string(),
-                        to: format!("{} :{}", mode_name(r.mode), r.tcp_port),
-                        port: r.tcp_port,
                         ..blank(Kind::Serial, &r.name, r.enabled)
                     }
                 }
                 ForwardRule::Ssh(r) => {
-                    let (path, how) = match r.direction {
-                        Direction::Local => (
-                            format!("127.0.0.1:{} → {}:{}", r.local_port, r.remote_host, r.remote_port),
-                            "本地转发",
-                        ),
-                        Direction::Remote => (
-                            format!("远端 :{} → {}:{}", r.local_port, r.remote_host, r.remote_port),
-                            "远程转发",
-                        ),
-                    };
                     let server = match r.ssh_port {
                         Some(p) => format!("{}:{p}", r.ssh_target),
                         None => r.ssh_target.clone(),
                     };
-                    let (tag, from) = match r.direction {
-                        Direction::Local => ("本地 -L", format!("127.0.0.1:{}", r.local_port)),
-                        Direction::Remote => ("远程 -R", format!("远端 127.0.0.1:{}", r.local_port)),
+                    // 本地转发：本机监听 → 服务器 → 目标；远程转发的监听端口开在服务器上
+                    let (path, how, tag) = match r.direction {
+                        Direction::Local => (
+                            format!("127.0.0.1:{} → {server} → {}:{}", r.local_port, r.remote_host, r.remote_port),
+                            "本地转发",
+                            "-L",
+                        ),
+                        Direction::Remote => (
+                            format!("{server} 远端 :{} → {}:{}", r.local_port, r.remote_host, r.remote_port),
+                            "远程转发",
+                            "-R",
+                        ),
                     };
                     RuleRow {
                         path,
                         sub: format!("{how} · 经 {}", r.ssh_target),
                         tag: tag.into(),
-                        from,
-                        via: server,
-                        to: format!("{}:{}", r.remote_host, r.remote_port),
                         ..blank(Kind::Ssh, &r.name, r.enabled)
                     }
                 }
                 ForwardRule::Tcp(r) => RuleRow {
                     path: format!("{} → {}", r.listen, r.target),
                     sub: format!("TCP · 最多 {} 个连接", r.max_connections),
-                    from: r.listen.clone(),
-                    to: r.target.clone(),
                     ..blank(Kind::Tcp, &r.name, r.enabled)
                 },
             };
@@ -211,6 +196,7 @@ pub fn build_rows(config: &Config, statuses: &[ForwardStatus]) -> Vec<RuleRow> {
                     row.status = text;
                     row.tone = tone;
                     row.detail = s.detail.clone();
+                    row.attempt = s.attempt;
                 }
             }
             row
@@ -268,10 +254,7 @@ fn blank(kind: Kind, name: &str, enabled: bool) -> RuleRow {
         detail: String::new(),
         enabled,
         tag: String::new(),
-        from: String::new(),
-        via: String::new(),
-        to: String::new(),
-        port: 0,
+        attempt: 0,
     }
 }
 
@@ -287,6 +270,116 @@ fn state_text(kind: Kind, s: &ForwardStatus) -> (String, Tone) {
         (_, State::Failed) => ("失败".into(), Tone::Bad),
         (_, State::Stopped) => ("已停止".into(), Tone::Off),
     }
+}
+
+/// 行下方的提示：失败（红）或 SSH 正在重连（橙）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Notice {
+    pub text: String,
+    pub tone: Tone,
+}
+
+/// 这一行要不要在下面多显示一行原因；正常、停用、等待设备时没有。
+pub fn notice(row: &RuleRow) -> Option<Notice> {
+    if row.tone == Tone::Bad {
+        return Some(Notice { text: explain_failure(row.kind, &row.detail), tone: Tone::Bad });
+    }
+    (row.kind == Kind::Ssh && row.attempt > 0).then(|| Notice {
+        text: format!("第 {} 次重连 · {}", row.attempt, explain_failure(row.kind, &row.detail)),
+        tone: Tone::Warn,
+    })
+}
+
+/// 把转发器给出的失败详情翻译成用户看得懂的一句话；认不出的原样给出最后一行。
+pub fn explain_failure(kind: Kind, detail: &str) -> String {
+    let lower = detail.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    match kind {
+        Kind::Tcp => {
+            if has(&["10048", "already in use", "address in use"]) {
+                return "监听失败：端口已被占用".into();
+            }
+            if has(&["10013", "permission denied", "access permissions", "访问权限"]) {
+                return "监听失败：没有权限监听该端口".into();
+            }
+            if has(&["绑定", "bind"]) {
+                return "监听失败（端口被占用或无权限）".into();
+            }
+        }
+        Kind::Serial => {
+            if has(&["拒绝访问", "access is denied", "permission denied", "busy"]) {
+                return "串口无法打开：被其它程序占用或没有权限".into();
+            }
+        }
+        Kind::Ssh => {
+            if has(&["permission denied"]) {
+                return "认证失败（检查密钥或 ssh-agent）".into();
+            }
+            if has(&["could not resolve hostname", "name or service not known", "name resolution"]) {
+                return "主机无法解析".into();
+            }
+            if has(&["connection refused"]) {
+                return "连接被拒绝（服务器没有监听该端口）".into();
+            }
+            if has(&["timed out", "timeout"]) {
+                return "连接超时".into();
+            }
+            if has(&["host key verification failed"]) {
+                return "主机密钥校验失败（请先在终端手动 ssh 一次确认）".into();
+            }
+            if has(&["address already in use", "could not request local forwarding", "cannot listen"]) {
+                return "本地端口已被占用".into();
+            }
+        }
+    }
+    let last = detail.lines().last().unwrap_or("").trim();
+    let last = last.strip_prefix("失败：").unwrap_or(last).trim();
+    if last.is_empty() {
+        "未知错误".into()
+    } else {
+        last.into()
+    }
+}
+
+/// 连接串口共享端口的命令：telnet 模式用 `telnet`，raw 模式用 `nc`。
+pub fn connect_command(mode: TerminalMode, host: &str, port: u16) -> String {
+    match mode {
+        TerminalMode::Telnet => format!("telnet {host} {port}"),
+        TerminalMode::Raw => format!("nc {host} {port}"),
+    }
+}
+
+/// 等价的 ssh 命令行（编辑对话框的预览与行菜单的「复制 ssh 命令」共用）。
+/// 端口等参数是原样的文字，编辑对话框里用户还没填完时也能拼出来。
+pub fn ssh_command(
+    remote: bool,
+    local_port: &str,
+    remote_host: &str,
+    remote_port: &str,
+    ssh_port: &str,
+    target: &str,
+) -> String {
+    let flag = if remote { "-R" } else { "-L" };
+    let ssh_port = ssh_port.trim();
+    format!(
+        "ssh -N {flag} 127.0.0.1:{}:{}:{}{} {}",
+        local_port.trim(),
+        remote_host.trim(),
+        remote_port.trim(),
+        if ssh_port.is_empty() { String::new() } else { format!(" -p {ssh_port}") },
+        target.trim(),
+    )
+}
+
+pub fn ssh_rule_command(r: &porttool_core::config::SshRule) -> String {
+    ssh_command(
+        r.direction == Direction::Remote,
+        &r.local_port.to_string(),
+        &r.remote_host,
+        &r.remote_port.to_string(),
+        &r.ssh_port.map(|p| p.to_string()).unwrap_or_default(),
+        &r.ssh_target,
+    )
 }
 
 pub fn stats(rows: &[RuleRow], metrics: &HashMap<String, Metrics>) -> Stats {
@@ -483,11 +576,13 @@ mod tests {
         ];
         let rows = build_rows(&config(), &statuses);
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].path, "COM7 · 1500000 → :7001", "已连接时显示实际 COM 号");
+        assert_eq!(rows[0].path, "COM7 · 1500000 → telnet :7001", "已连接时显示实际 COM 号");
         assert_eq!(rows[0].status, "已连接");
         assert_eq!(rows[1].status, "重连中 第2次", "重连次数来自结构化字段，不解析 detail 文字");
         assert_eq!(rows[1].tone, Tone::Warn);
-        assert_eq!(rows[1].path, "127.0.0.1:8443 → gitlab.internal:443");
+        assert_eq!(rows[1].path, "127.0.0.1:8443 → ops@jump → gitlab.internal:443");
+        assert_eq!(rows[1].attempt, 2);
+        assert_eq!(rows[2].path, "0.0.0.0:1883 → 192.168.5.60:1883");
         assert_eq!(rows[2].status, "已停用");
         assert!(!rows[2].enabled);
     }
@@ -500,7 +595,7 @@ mod tests {
         // 串口没有 endpoint 时用配置里的设备
         let serial = status("A1", RuleType::Serial, State::Starting, "已连接 COM9 @ 1", 0);
         let rows = build_rows(&config(), &[serial]);
-        assert_eq!(rows[0].path, "COM5 · 1500000 → :7001", "COM 号只认 endpoint，不再解析 detail");
+        assert_eq!(rows[0].path, "COM5 · 1500000 → telnet :7001", "COM 号只认 endpoint，不再解析 detail");
     }
 
     fn snapshot(name: &str, rx: u64, tx: u64) -> PortSnapshot {
@@ -527,10 +622,12 @@ mod tests {
         let metrics = build_metrics(&config(), &statuses, &[snapshot("A1", 3 * 1_048_576, 2048)]);
         assert_eq!(metrics["A1"].conns_text(), "2 个连接");
         assert_eq!(metrics["A1"].traffic_text(), "↓ 3.0 MB ↑ 2.0 KB");
-        assert_eq!((metrics["A1"].rx_text(), metrics["A1"].tx_text()), ("3.0 MB".into(), "2.0 KB".into()));
-        assert_eq!(metrics["gitlab"].conns_text(), "—", "SSH 没有连接数");
+        assert_eq!(metrics["A1"].activity_text(), "2 个连接 · ↓ 3.0 MB ↑ 2.0 KB");
+        assert_eq!(metrics["gitlab"].activity_text(), "", "SSH 没有连接数，也没有流量：不画任何东西");
+        let idle = Metrics { clients: None, traffic: Some((0, 0)) };
+        assert_eq!(idle.activity_text(), "", "还没有数据收发时不显示 ↓ 0 B ↑ 0 B");
         assert_eq!(metrics["mqtt"], Metrics::default(), "已停用的规则没有数据");
-        assert_eq!(metrics["mqtt"].traffic_text(), "—");
+        assert_eq!(metrics["mqtt"].activity_text(), "", "没有数据时留空，不用「—」占位");
 
         // 流量变了只体现在 Metrics 上；build_rows 根本不接收快照，行不会受影响
         let metrics_b = build_metrics(&config(), &statuses, &[snapshot("A1", 9, 9)]);
@@ -587,14 +684,82 @@ mod tests {
     }
 
     #[test]
-    fn serial_row_carries_what_the_flow_blocks_show() {
-        let rows = build_rows(&config(), &[]);
-        let a1 = rows.iter().find(|r| r.name == "A1").unwrap();
-        assert_eq!(a1.from, "COM5 · 1500000");
-        assert_eq!(a1.to, "telnet :7001");
-        assert_eq!((a1.via.as_str(), a1.port), ("telnet", 7001));
-        // 非串口规则没有终端端口
-        assert!(rows.iter().filter(|r| r.kind != Kind::Serial).all(|r| r.port == 0));
+    fn failure_reasons_are_explained_in_plain_words() {
+        let ssh = |d: &str| explain_failure(Kind::Ssh, d);
+        assert_eq!(ssh("失败：Permission denied (publickey)."), "认证失败（检查密钥或 ssh-agent）");
+        assert_eq!(ssh("ssh: Could not resolve hostname dev.invalid: Name or service not known"), "主机无法解析");
+        assert_eq!(ssh("ssh: connect to host x port 22: Connection refused"), "连接被拒绝（服务器没有监听该端口）");
+        assert_eq!(ssh("ssh: connect to host x port 22: Connection timed out"), "连接超时");
+        assert_eq!(
+            ssh("Host key verification failed."),
+            "主机密钥校验失败（请先在终端手动 ssh 一次确认）"
+        );
+        assert_eq!(ssh("bind [127.0.0.1]:8086: Address already in use"), "本地端口已被占用");
+        // 认不出的：去掉「失败：」前缀，给最后一行
+        assert_eq!(ssh("失败：first\nsomething odd happened"), "something odd happened");
+        assert_eq!(ssh(""), "未知错误");
+
+        // TCP：Windows 本地化的错误信息只认错误码
+        assert_eq!(
+            explain_failure(Kind::Tcp, "绑定端口失败: 通常每个套接字地址只允许使用一次。 (os error 10048)"),
+            "监听失败：端口已被占用"
+        );
+        assert_eq!(
+            explain_failure(Kind::Tcp, "绑定端口失败: 以一种访问权限不允许的方式做了一个访问套接字的尝试。 (os error 10013)"),
+            "监听失败：没有权限监听该端口"
+        );
+        assert_eq!(explain_failure(Kind::Tcp, "绑定端口失败: 别的原因"), "监听失败（端口被占用或无权限）");
+        // 串口
+        assert_eq!(
+            explain_failure(Kind::Serial, "无法打开 COM5：拒绝访问。"),
+            "串口无法打开：被其它程序占用或没有权限"
+        );
+    }
+
+    #[test]
+    fn notice_only_for_failures_and_reconnects() {
+        let failed = build_rows(
+            &config(),
+            &[status("gitlab", RuleType::Ssh, State::Failed, "失败：Permission denied", 0)],
+        );
+        let n = notice(&failed[1]).unwrap();
+        assert_eq!((n.tone, n.text.as_str()), (Tone::Bad, "认证失败（检查密钥或 ssh-agent）"));
+
+        let reconnecting = build_rows(
+            &config(),
+            &[ForwardStatus {
+                attempt: 2,
+                ..status("gitlab", RuleType::Ssh, State::Starting, "连接中断，4 秒后重连：ssh: Could not resolve hostname x", 0)
+            }],
+        );
+        let n = notice(&reconnecting[1]).unwrap();
+        assert_eq!((n.tone, n.text.as_str()), (Tone::Warn, "第 2 次重连 · 主机无法解析"));
+
+        // 正常运行、停用、等待设备：没有提示行
+        let ok = build_rows(
+            &config(),
+            &[
+                status("A1", RuleType::Serial, State::Starting, "等待设备接入", 0),
+                status("gitlab", RuleType::Ssh, State::Running, "运行中", 0),
+            ],
+        );
+        assert!(ok.iter().all(|r| notice(r).is_none()), "{ok:?}");
+    }
+
+    #[test]
+    fn commands_for_copy() {
+        assert_eq!(connect_command(TerminalMode::Telnet, "192.168.5.30", 7001), "telnet 192.168.5.30 7001");
+        assert_eq!(connect_command(TerminalMode::Raw, "192.168.5.30", 7001), "nc 192.168.5.30 7001");
+        let ssh = match &config().rules[1] {
+            ForwardRule::Ssh(r) => r.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ssh_rule_command(&ssh), "ssh -N -L 127.0.0.1:8443:gitlab.internal:443 ops@jump");
+        let with_port = SshRule { ssh_port: Some(2222), direction: Direction::Remote, ..ssh };
+        assert_eq!(
+            ssh_rule_command(&with_port),
+            "ssh -N -R 127.0.0.1:8443:gitlab.internal:443 -p 2222 ops@jump"
+        );
     }
 
     #[test]

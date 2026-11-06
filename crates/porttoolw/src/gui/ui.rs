@@ -64,14 +64,3 @@ pub fn panel(body: Element) -> Element {
         .corner(10.0)
         .child(body)
 }
-
-/// 灰底小块：标签 + 等宽值（SSH 三段流程、连接命令）。
-pub fn info_block(caption: &str, value: &str) -> Element {
-    Element::col()
-        .bg_role(Role::SurfaceAlt)
-        .corner(8.0)
-        .padding_xy(12, 8)
-        .spacing(2)
-        .child(Element::label(caption).fg_role(Role::TextMuted).font_size(windui::theme::current().metrics.font_xs))
-        .child(mono(value.to_string()))
-}

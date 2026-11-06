@@ -194,13 +194,7 @@ pub fn data_row(gui: &Gui, r: RuleRow) -> Element {
                 .weight(W_STATUS)
                 .child(status_pill(&r.status, r.tone).tooltip(r.detail.clone())),
         )
-        .child(
-            Element::col()
-                .weight(W_CONN)
-                .spacing(2)
-                .child(Element::label(metrics.conns))
-                .child(Element::label(metrics.traffic).fg_role(Role::TextMuted).font_size(12.0)),
-        )
+        .child(Element::col().weight(W_CONN).child(Element::label(metrics.activity).fg_role(Role::TextMuted)))
         .child(
             Element::hstack()
                 .width(W_OPS)

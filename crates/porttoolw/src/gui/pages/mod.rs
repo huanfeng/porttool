@@ -1,15 +1,14 @@
 //! 各页面。
 
+pub mod list;
 pub mod overview;
-pub mod serial;
 pub mod settings;
-pub mod ssh;
-pub mod tcp;
 
 use windui::prelude::*;
 
-use super::model::{Kind, RuleRow};
-use crate::gui::ui::status_pill;
+use porttool_core::config::{ForwardRule, TerminalMode};
+
+use super::model::{self, Kind, RuleRow};
 use super::Gui;
 
 /// 页面内容的统一外框：24px 内边距的纵向容器。
@@ -31,7 +30,7 @@ pub fn row_actions(gui: &Gui, row: &RuleRow) -> Element {
         .child(more_button(gui, row.kind, &row.name))
 }
 
-/// 「…」按钮：编辑 / 删除菜单。
+/// 「…」按钮：编辑 / 复制命令 / 删除菜单。
 pub fn more_button(gui: &Gui, kind: Kind, name: &str) -> Element {
     let gui = gui.clone();
     let name = name.to_string();
@@ -44,45 +43,55 @@ pub fn more_button(gui: &Gui, kind: Kind, name: &str) -> Element {
             let (gui, name) = (gui.clone(), name.clone());
             MenuItem::run("删除", move |_| gui.editors.confirm_delete(name.clone()), false)
         };
-        let mut req = MenuRequest::below(ctx.bounds(), vec![edit, MenuItem::separator(), delete]);
+        let mut items = vec![edit];
+        items.extend(copy_item(&gui, kind, &name));
+        items.push(MenuItem::separator());
+        items.push(delete);
+        let mut req = MenuRequest::below(ctx.bounds(), items);
         req.click_through = false;
         ctx.show_menu_request(req);
     })
 }
 
-/// 三个转发页共用的规则卡片：头部 = 名称（+类型徽章）+ 状态胶囊 + 开关 + …菜单，中部由各页传入。
-pub fn rule_card(gui: &Gui, r: &RuleRow, middle: Vec<Element>) -> Element {
-    let mut head = vec![
-        Element::label(r.name.clone()).font_size(16.0).font_weight(700),
-        status_pill(&r.status, r.tone).tooltip(r.detail.clone()),
-        Element::flex_spacer(),
-    ];
-    if !r.tag.is_empty() {
-        head.insert(1, Element::badge_intent(r.tag.clone(), Intent::Success));
-    }
-    head.push(row_actions(gui, r));
-
-    Element::col()
-        .width_match()
-        .padding(16)
-        .spacing(12)
-        .border_role(Role::Divider, 1)
-        .corner(10.0)
-        .bg_role(Role::Surface)
-        .child(Element::hstack().width_match().cross(Align::Center).spacing(10).children(head))
-        .children(middle)
+/// 菜单里「复制命令」要复制什么。
+enum CopyTarget {
+    /// 串口：终端连接命令，主机在点击时取
+    Serial(TerminalMode, u16),
+    /// SSH：等价的 ssh 命令行
+    Ssh(String),
 }
 
-/// 卡片副行：连接数 · 流量 · 参数（串口与 TCP 页共用）。
-pub fn sub_line(gui: &Gui, r: &RuleRow) -> Element {
-    let metrics = gui.metric_signals(&r.name);
-    let part = |text: TextContent| Element::label(text).fg_role(Role::TextMuted);
-    Element::hstack()
-        .spacing(0)
-        .child(part(metrics.conns.into()))
-        .child(part(" · ".into()))
-        .child(part(metrics.traffic.into()))
-        .child(part(format!(" · {}", r.sub).into()))
+/// 串口规则的「复制连接命令」、SSH 规则的「复制 ssh 命令」。
+/// 规则在打开菜单时现取，主机在点击时现取，配置改了也是最新的。
+fn copy_item(gui: &Gui, kind: Kind, name: &str) -> Option<MenuItem> {
+    let config = gui.service.config_arc();
+    let (label, target) = match kind {
+        Kind::Serial => {
+            let rule = config.serial_rules().find(|r| r.name == name)?;
+            ("复制连接命令", CopyTarget::Serial(rule.mode, rule.tcp_port))
+        }
+        Kind::Ssh => {
+            let rule = config.rules.iter().find_map(|r| match r {
+                ForwardRule::Ssh(s) if s.name == name => Some(s),
+                _ => None,
+            })?;
+            ("复制 ssh 命令", CopyTarget::Ssh(model::ssh_rule_command(rule)))
+        }
+        Kind::Tcp => return None,
+    };
+    let gui = gui.clone();
+    Some(MenuItem::run(
+        label,
+        move |ctx| {
+            let text = match &target {
+                CopyTarget::Serial(mode, port) => model::connect_command(*mode, &gui.host_for_commands(), *port),
+                CopyTarget::Ssh(command) => command.clone(),
+            };
+            ctx.clipboard_set(&text);
+            ctx.toast_ok(format!("已复制：{text}"));
+        },
+        false,
+    ))
 }
 
 /// 「新建」按钮：弹出类型菜单。

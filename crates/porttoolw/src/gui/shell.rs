@@ -2,6 +2,7 @@
 
 use windui::prelude::*;
 
+use super::model::Kind;
 use super::{pages, ui, Gui};
 
 /// 亮暗色板：沿用 windui 默认色板，只把强调色换成设计稿的蓝。
@@ -42,9 +43,9 @@ pub fn main_view(gui: &Gui) -> Element {
                 .weight(1.0)
                 .width_match()
                 .child(pages::overview::view(gui).visible_when(move || page.get() == 0))
-                .child(pages::serial::view(gui).visible_when(move || page.get() == 1))
-                .child(pages::ssh::view(gui).visible_when(move || page.get() == 2))
-                .child(pages::tcp::view(gui).visible_when(move || page.get() == 3))
+                .child(pages::list::type_page(gui, Kind::Serial).visible_when(move || page.get() == 1))
+                .child(pages::list::type_page(gui, Kind::Ssh).visible_when(move || page.get() == 2))
+                .child(pages::list::type_page(gui, Kind::Tcp).visible_when(move || page.get() == 3))
                 .child(pages::settings::view(gui).visible_when(move || page.get() == 4)),
         );
 

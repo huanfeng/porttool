@@ -363,9 +363,13 @@ impl SerialEditor {
         let update_preview = {
             let host = host.clone();
             move || {
-                let cmd = match mode.get() {
-                    0 => format!("telnet {host} {}", tcp_port.get().trim()),
-                    _ => format!("nc {host} {}", tcp_port.get().trim()),
+                let port = tcp_port.get();
+                let cmd = match (mode.get(), port.trim().parse::<u16>()) {
+                    (0, Ok(p)) => model::connect_command(TerminalMode::Telnet, &host, p),
+                    (_, Ok(p)) => model::connect_command(TerminalMode::Raw, &host, p),
+                    // 端口还没填完整：照原样拼出来看
+                    (0, Err(_)) => format!("telnet {host} {}", port.trim()),
+                    (_, Err(_)) => format!("nc {host} {}", port.trim()),
                 };
                 preview.set(cmd);
             }
@@ -567,16 +571,13 @@ impl SshEditor {
     }
 
     fn update_preview(&self) {
-        let flag = if self.direction.get() == 1 { "-R" } else { "-L" };
-        let port = self.ssh_port.get();
-        let port = port.trim();
-        self.preview.set(format!(
-            "ssh -N {flag} 127.0.0.1:{}:{}:{}{} {}",
-            self.local_port.get().trim(),
-            self.remote_host.get().trim(),
-            self.remote_port.get().trim(),
-            if port.is_empty() { String::new() } else { format!(" -p {port}") },
-            self.target.get().trim(),
+        self.preview.set(model::ssh_command(
+            self.direction.get() == 1,
+            &self.local_port.get(),
+            &self.remote_host.get(),
+            &self.remote_port.get(),
+            &self.ssh_port.get(),
+            &self.target.get(),
         ));
     }
 

@@ -62,37 +62,23 @@ impl UrlCache {
     }
 }
 
-/// 一条规则的实时数据文案（连接数、流量），行内标签直接绑定这些信号。
-/// 刷新时只改这些信号，规则行（`RuleRow`）不变就不会被 `list_signal` 重建。
+/// 一条规则的实时数据文案（`2 个连接 · ↓ 27.3 MB ↑ 9.0 KB`，没有数据时为空），行内标签直接绑定它。
+/// 刷新时只改这个信号，规则行（`RuleRow`）不变就不会被 `list_signal` 重建。
 #[derive(Clone, Copy)]
 pub struct MetricSignals {
-    /// `2 个连接` / `—`
-    pub conns: Signal<String>,
-    /// `↓ 27.3 MB ↑ 9.0 KB` / `—`
-    pub traffic: Signal<String>,
-    /// 串口详情用：接收 / 发送字节数、连接数
-    pub rx: Signal<String>,
-    pub tx: Signal<String>,
-    pub clients: Signal<String>,
+    pub activity: Signal<String>,
 }
 
 impl MetricSignals {
     fn new() -> Self {
-        let dash = || signal(String::from("—"));
-        Self { conns: dash(), traffic: dash(), rx: dash(), tx: dash(), clients: signal(String::from("0")) }
+        Self { activity: signal(String::new()) }
     }
 
     fn apply(&self, m: &model::Metrics) {
-        let set = |sig: Signal<String>, text: String| {
-            if sig.with(|t| *t != text) {
-                sig.set(text);
-            }
-        };
-        set(self.conns, m.conns_text());
-        set(self.traffic, m.traffic_text());
-        set(self.rx, m.rx_text());
-        set(self.tx, m.tx_text());
-        set(self.clients, m.clients_text());
+        let text = m.activity_text();
+        if self.activity.with(|t| *t != text) {
+            self.activity.set(text);
+        }
     }
 }
 
@@ -374,7 +360,7 @@ impl Gui {
     pub fn metric_signals(&self, name: &str) -> MetricSignals {
         let mut map = self.metrics.borrow_mut();
         match map.get(name) {
-            Some(m) if m.conns.is_alive() => *m,
+            Some(m) if m.activity.is_alive() => *m,
             _ => {
                 let m = MetricSignals::new();
                 map.insert(name.to_string(), m);
@@ -484,6 +470,13 @@ impl Gui {
             ForwardRule::Tcp(r) => r.enabled = enabled,
         }
         self.apply_config(config).map_err(|e| format!("{e:#}"))
+    }
+
+    /// 重试 SSH / TCP 规则（停止再启动）。
+    pub fn restart_rule(&self, name: &str) -> Result<(), String> {
+        let result = self.runtime.block_on(self.service.restart_rule(name));
+        self.refresh();
+        result.map_err(|e| format!("{e:#}"))
     }
 
     pub fn delete_rule(&self, name: &str) -> Result<(), String> {
@@ -796,7 +789,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, gui) = setup_target(dir.path(), &target_addr);
         gui.refresh();
-        let conns = gui.metric_signals("web").conns;
+        let conns = gui.metric_signals("web").activity;
         assert_eq!(conns.get(), "0 个连接");
         let rows_version = gui.rows.version();
 
@@ -823,7 +816,7 @@ pub(super) mod tests {
         gui.refresh();
         assert_ne!(gui.rows.version(), rows_version, "状态变化应更新规则行");
         assert_eq!(gui.rows.with(|r| r[0].status.clone()), "已停用");
-        assert_eq!(conns.get(), "—", "停用后没有连接数");
+        assert_eq!(conns.get(), "", "停用后没有连接数，留空");
         runtime.block_on(gui.service.shutdown());
     }
 
