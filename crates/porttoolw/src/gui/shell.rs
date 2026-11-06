@@ -70,15 +70,21 @@ fn sidebar(gui: &Gui) -> Element {
     let attention = gui.summary_attention;
     let pill_role = attention.map(|a| if *a { Role::Warning } else { Role::Success });
 
-    let brand_icon = crate::icon::render(36, None);
     let brand = Element::col()
         .spacing(6)
         .padding_xy(6, 4)
+        .margin_xy(0, 6)
         .child(
             Element::row()
                 .cross(Align::Center)
                 .spacing(8)
-                .child(Element::image_rgba(36, 36, brand_icon.rgba()).width(36).height(36))
+                // SVG 由 windui 按实际物理像素光栅化，高 DPI 下也清晰；
+                // 位图放大会发糊。
+                .child(
+                    Element::image_svg(include_bytes!("../../../../docs/porttool-icon.svg"), None)
+                        .width(36)
+                        .height(36),
+                )
                 .child(Element::label("PortTool").font_size(metrics.font_lg).font_weight(700)),
         )
         .child(
@@ -94,7 +100,6 @@ fn sidebar(gui: &Gui) -> Element {
         .padding(12)
         .spacing(4)
         .child(brand)
-        .child(Element::label("转发服务").fg_role(Role::TextMuted).padding_xy(14, 10))
         .child(nav_item(gui, 0, "概览", None))
         .child(nav_item(gui, 1, "串口共享", Some(gui.nav_counts[0])))
         .child(nav_item(gui, 2, "SSH 转发", Some(gui.nav_counts[1])))
@@ -139,10 +144,9 @@ fn nav_item(gui: &Gui, index: usize, label: &str, count: Option<Signal<String>>)
     row
 }
 
+/// 状态栏：只有 HTTP 接口地址，点一下复制。打开日志 / 配置文件等操作都在「设置」里。
 fn status_bar(gui: &Gui) -> Element {
     let url = gui.http_url;
-    let g = gui.clone();
-    let g2 = gui.clone();
     Element::row()
         .width_match()
         .height(34)
@@ -150,15 +154,20 @@ fn status_bar(gui: &Gui) -> Element {
         .bg_role(Role::Surface)
         .border_role(Role::Divider, 1)
         .padding_xy(16, 0)
-        .spacing(10)
-        .child(Element::label("●").fg_role(Role::Success))
-        .child(Element::label("HTTP 接口").fg_role(Role::TextMuted))
-        .child(ui::mono(url))
-        .child(Element::button("复制").small().outline().neutral().on_click(move |ctx| {
-            ctx.clipboard_set(&url.get());
-            ctx.toast_ok("已复制 HTTP 地址");
-        }))
-        .child(Element::flex_spacer())
-        .child(Element::button("打开日志目录").small().outline().neutral().on_click(move |_| g.open_log_dir()))
-        .child(Element::button("打开配置文件").small().outline().neutral().on_click(move |_| g2.open_config()))
+        .child(
+            Element::row()
+                .cross(Align::Center)
+                .spacing(8)
+                .padding_xy(8, 3)
+                .corner(6.0)
+                .clickable()
+                .tooltip("点击复制 HTTP 接口地址")
+                .on_click(move |ctx| {
+                    ctx.clipboard_set(&url.get());
+                    ctx.toast_ok("已复制 HTTP 地址");
+                })
+                .child(Element::label("●").fg_role(Role::Success))
+                .child(Element::label("HTTP 接口").fg_role(Role::TextMuted))
+                .child(ui::mono(url)),
+        )
 }
