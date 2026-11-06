@@ -493,19 +493,88 @@ pub fn next_candidate_ports(used: &[u16]) -> Vec<u16> {
         .collect()
 }
 
-/// 按类型和关键字筛选；关键字匹配名称、路径、副行（不区分大小写）。
-pub fn filter_rows(rows: &[RuleRow], kind: Option<Kind>, query: &str) -> Vec<RuleRow> {
-    let q = query.trim().to_lowercase();
-    rows.iter()
-        .filter(|r| kind.is_none_or(|k| r.kind == k))
+/// 列表按状态筛选：全部 / 异常 / 已停用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusFilter {
+    #[default]
+    All,
+    Problem,
+    Disabled,
+}
+
+impl StatusFilter {
+    /// 对应 segmented 控件的下标（全部｜异常｜已停用）。
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            1 => StatusFilter::Problem,
+            2 => StatusFilter::Disabled,
+            _ => StatusFilter::All,
+        }
+    }
+}
+
+/// 「异常」：失败了，或者 SSH 正在重连。
+pub fn is_problem(r: &RuleRow) -> bool {
+    r.tone == Tone::Bad || (r.kind == Kind::Ssh && r.attempt > 0)
+}
+
+/// 一个列表页怎么显示：限定类型、搜索词、状态筛选、是否异常优先。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ViewSpec {
+    pub kind: Option<Kind>,
+    pub query: String,
+    pub status: StatusFilter,
+    pub problems_first: bool,
+}
+
+/// 排序用的优先级：失败 → 重连 / 等待 → 正常 → 已停用。
+fn sort_rank(r: &RuleRow) -> u8 {
+    match r.tone {
+        Tone::Bad => 0,
+        Tone::Warn => 1,
+        Tone::Ok => 2,
+        Tone::Off => 3,
+    }
+}
+
+/// 按 `spec` 筛选并排序；关键字匹配名称、路径、次要参数和状态文字（不区分大小写）。
+/// 排序是稳定的：同一优先级内保持配置里的顺序。
+pub fn select_rows(rows: &[RuleRow], spec: &ViewSpec) -> Vec<RuleRow> {
+    let q = spec.query.trim().to_lowercase();
+    let mut out: Vec<RuleRow> = rows
+        .iter()
+        .filter(|r| spec.kind.is_none_or(|k| r.kind == k))
+        .filter(|r| match spec.status {
+            StatusFilter::All => true,
+            StatusFilter::Problem => is_problem(r),
+            StatusFilter::Disabled => !r.enabled,
+        })
         .filter(|r| {
             q.is_empty()
-                || [&r.name, &r.path, &r.sub]
+                || [&r.name, &r.path, &r.sub, &r.status]
                     .iter()
                     .any(|f| f.to_lowercase().contains(&q))
         })
         .cloned()
-        .collect()
+        .collect();
+    if spec.problems_first {
+        out.sort_by_key(sort_rank);
+    }
+    out
+}
+
+/// 工具栏右侧的统计文字：`共 32 条 · 异常 6 · 已停用 4`（为 0 的项省略）。
+pub fn list_summary(rows: &[RuleRow]) -> String {
+    let problems = rows.iter().filter(|r| is_problem(r)).count();
+    let disabled = rows.iter().filter(|r| !r.enabled).count();
+    let mut text = format!("共 {} 条", rows.len());
+    if problems > 0 {
+        text.push_str(&format!(" · 异常 {problems}"));
+    }
+    if disabled > 0 {
+        text.push_str(&format!(" · 已停用 {disabled}"));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -762,14 +831,80 @@ mod tests {
         );
     }
 
+    fn spec(kind: Option<Kind>, query: &str, status: StatusFilter, problems_first: bool) -> ViewSpec {
+        ViewSpec { kind, query: query.into(), status, problems_first }
+    }
+
     #[test]
     fn filter_by_kind_and_query() {
         let rows = build_rows(&config(), &[]);
-        assert_eq!(filter_rows(&rows, None, "").len(), 3);
-        assert_eq!(filter_rows(&rows, Some(Kind::Ssh), "").len(), 1);
-        assert_eq!(filter_rows(&rows, None, "GITLAB").len(), 1);
-        assert_eq!(filter_rows(&rows, None, "1883").len(), 1);
-        assert!(filter_rows(&rows, Some(Kind::Tcp), "gitlab").is_empty());
+        let all = |kind, q: &str| select_rows(&rows, &spec(kind, q, StatusFilter::All, false));
+        assert_eq!(all(None, "").len(), 3);
+        assert_eq!(all(Some(Kind::Ssh), "").len(), 1);
+        assert_eq!(all(None, "GITLAB").len(), 1);
+        assert_eq!(all(None, "1883").len(), 1);
+        assert!(all(Some(Kind::Tcp), "gitlab").is_empty());
+        // 状态文字也能搜：「已停用」就是 mqtt
+        let found = all(None, "已停用");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "mqtt");
+    }
+
+    /// 四条规则：失败、重连中、正常、已停用，故意不按这个顺序排。
+    fn mixed_rows() -> Vec<RuleRow> {
+        let mut config = config();
+        let tcp = |name: &str, port: u16, enabled: bool| {
+            ForwardRule::Tcp(TcpRule {
+                name: name.into(),
+                listen: format!("127.0.0.1:{port}"),
+                target: "127.0.0.1:9".into(),
+                max_connections: 10,
+                enabled,
+            })
+        };
+        config.rules = vec![
+            tcp("off", 9001, false),
+            tcp("ok", 9002, true),
+            ForwardRule::Ssh(SshRule { name: "retry".into(), ..match &config.rules[1] {
+                ForwardRule::Ssh(r) => r.clone(),
+                _ => unreachable!(),
+            } }),
+            tcp("bad", 9004, true),
+        ];
+        let statuses = vec![
+            status("ok", RuleType::Tcp, State::Running, "监听中", 0),
+            ForwardStatus { attempt: 1, ..status("retry", RuleType::Ssh, State::Starting, "连接中断", 0) },
+            status("bad", RuleType::Tcp, State::Failed, "绑定端口失败", 0),
+        ];
+        build_rows(&config, &statuses)
+    }
+
+    #[test]
+    fn problems_first_sorts_stably_and_status_filter_works() {
+        let rows = mixed_rows();
+        let names = |v: Vec<RuleRow>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
+
+        // 不排序：保持配置里的顺序
+        assert_eq!(names(select_rows(&rows, &spec(None, "", StatusFilter::All, false))), ["off", "ok", "retry", "bad"]);
+        // 异常优先：失败 → 重连 → 正常 → 已停用
+        assert_eq!(names(select_rows(&rows, &spec(None, "", StatusFilter::All, true))), ["bad", "retry", "ok", "off"]);
+        // 只看异常：失败和 SSH 重连
+        assert_eq!(names(select_rows(&rows, &spec(None, "", StatusFilter::Problem, true))), ["bad", "retry"]);
+        // 只看已停用
+        assert_eq!(names(select_rows(&rows, &spec(None, "", StatusFilter::Disabled, true))), ["off"]);
+        // 类型 + 状态叠加
+        assert_eq!(names(select_rows(&rows, &spec(Some(Kind::Tcp), "", StatusFilter::Problem, true))), ["bad"]);
+        assert_eq!(StatusFilter::from_index(0), StatusFilter::All);
+        assert_eq!(StatusFilter::from_index(1), StatusFilter::Problem);
+        assert_eq!(StatusFilter::from_index(2), StatusFilter::Disabled);
+    }
+
+    #[test]
+    fn list_summary_omits_zero_parts() {
+        assert_eq!(list_summary(&mixed_rows()), "共 4 条 · 异常 2 · 已停用 1");
+        let healthy = build_rows(&config(), &[]);
+        assert_eq!(list_summary(&healthy[..2]), "共 2 条");
+        assert_eq!(list_summary(&[]), "共 0 条");
     }
 
     #[test]

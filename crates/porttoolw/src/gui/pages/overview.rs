@@ -111,35 +111,19 @@ fn alert_bar(gui: &Gui) -> Element {
 }
 
 fn table(gui: &Gui) -> Element {
-    let toolbar = Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .padding(12)
-        .spacing(12)
-        .child(
-            Element::text_input(gui.query, "搜索名称、端口或主机")
-                .leading_icon('\u{1F50D}')
-                .width(300),
-        )
-        .child(Element::flex_spacer())
-        .child(Element::segmented(vec!["全部", "串口", "SSH", "TCP"], gui.filter));
-
-    let rows = list::rule_list(gui, gui.shown, true);
-    let shown = gui.shown;
-    let empty = Element::label("没有匹配的规则，点右上角「新建」添加。")
-        .fg_role(Role::TextMuted)
-        .width_match()
-        .padding(24)
-        .visible_when(move || shown.with(|s| s.is_empty()));
-
     panel(
         Element::col()
             .width_match()
             .height_match()
-            .child(toolbar)
-            .child(list::header("路径"))
-            .child(empty)
-            .child(rows),
+            .child(list::toolbar(gui, 0))
+            .child(list::header("路径", true))
+            .child(list::empty_state(
+                gui,
+                0,
+                "还没有任何转发规则。",
+                super::new_button(gui, "＋ 新建"),
+            ))
+            .child(list::rule_list(gui, gui.views[0].shown, true)),
     )
     .weight(1.0)
 }

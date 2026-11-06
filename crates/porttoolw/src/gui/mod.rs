@@ -62,6 +62,43 @@ impl UrlCache {
     }
 }
 
+/// 一个列表页的输入（搜索词、筛选、排序）和算出来的结果。每个页面各有一组，互不影响。
+#[derive(Clone, Copy)]
+pub struct ViewState {
+    /// 概览页的类型筛选：0 全部、1 串口、2 SSH、3 TCP（类型页不用）
+    pub kind: Signal<usize>,
+    pub query: Signal<String>,
+    /// 状态筛选：0 全部、1 异常、2 已停用
+    pub status: Signal<usize>,
+    /// 异常优先排序，默认开
+    pub problems_first: Signal<bool>,
+    /// 筛选并排序后要显示的行
+    pub shown: Signal<Vec<RuleRow>>,
+    /// 工具栏右侧的统计文字（统计的是该页类型范围内的全部规则）
+    pub summary: Signal<String>,
+    /// 该页类型范围内一共有多少条规则（区分「还没有规则」和「被筛选为空」）
+    pub total: Signal<usize>,
+}
+
+impl ViewState {
+    fn new() -> Self {
+        Self {
+            kind: signal(0),
+            query: signal(String::new()),
+            status: signal(0),
+            problems_first: signal(true),
+            shown: signal(Vec::new()),
+            summary: signal(String::new()),
+            total: signal(0),
+        }
+    }
+
+    /// 四个输入信号的版本号，任何一个变了就要重算。
+    fn input_versions(&self) -> [u64; 4] {
+        [self.kind.version(), self.query.version(), self.status.version(), self.problems_first.version()]
+    }
+}
+
 /// 一条规则的实时数据文案（`2 个连接 · ↓ 27.3 MB ↑ 9.0 KB`，没有数据时为空），行内标签直接绑定它。
 /// 刷新时只改这个信号，规则行（`RuleRow`）不变就不会被 `list_signal` 重建。
 #[derive(Clone, Copy)]
@@ -98,10 +135,8 @@ pub struct Gui {
     runtime: tokio::runtime::Handle,
     /// 所有规则的行
     rows: Signal<Vec<RuleRow>>,
-    /// 概览表格当前显示的行（按类型和关键字筛选后）
-    shown: Signal<Vec<RuleRow>>,
-    /// 按类型分开的行（串口 / SSH / TCP 各页用）
-    by_kind: [Signal<Vec<RuleRow>>; 3],
+    /// 四个列表页（0 概览、1 串口、2 SSH、3 TCP）各自的搜索 / 筛选 / 排序状态和显示的行
+    views: [ViewState; 4],
     /// 单元素向量：概览统计卡片据此重建
     stats: Signal<Vec<Stats>>,
     /// 失败的规则：告警条据此显示
@@ -111,13 +146,12 @@ pub struct Gui {
     summary_attention: Signal<bool>,
     /// 侧栏的数量徽章（串口 / SSH / TCP）
     nav_counts: [Signal<String>; 3],
+    /// 侧栏里的异常数徽章；没有异常时为空串（不显示）
+    nav_problems: [Signal<String>; 3],
     /// 当前页：0 概览、1 串口、2 SSH、3 TCP、4 设置
     page: Signal<usize>,
-    /// 概览筛选：0 全部、1 串口、2 SSH、3 TCP
-    filter: Signal<usize>,
-    query: Signal<String>,
-    /// 概览表格已按哪个版本的（筛选, 搜索）计算过
-    filter_seen: Rc<Cell<(u64, u64)>>,
+    /// 每个列表页已按哪一版输入信号算过结果（用 `version()` 判断有没有变化）
+    view_seen: Rc<Cell<[[u64; 4]; 4]>>,
     autostart: Signal<bool>,
     /// 配置文件解析失败的错误信息；非空时禁止在界面里保存配置
     load_error: Signal<String>,
@@ -245,17 +279,15 @@ impl Gui {
             service,
             runtime,
             rows: signal(Vec::new()),
-            shown: signal(Vec::new()),
-            by_kind: [signal(Vec::new()), signal(Vec::new()), signal(Vec::new())],
+            views: [ViewState::new(), ViewState::new(), ViewState::new(), ViewState::new()],
             stats: signal(Vec::new()),
             alerts: signal(Vec::new()),
             summary: signal(String::new()),
             summary_attention: signal(false),
             nav_counts: [signal("0".into()), signal("0".into()), signal("0".into())],
+            nav_problems: [signal(String::new()), signal(String::new()), signal(String::new())],
             page: signal(0),
-            filter: signal(0),
-            query: signal(String::new()),
-            filter_seen: Rc::new(Cell::new((0, 0))),
+            view_seen: Rc::new(Cell::new([[0; 4]; 4])),
             autostart: signal(autostart::is_enabled()),
             load_error: signal(load_error.unwrap_or_default()),
             http_url: signal(String::new()),
@@ -267,7 +299,7 @@ impl Gui {
             dismissed_alerts: Rc::new(RefCell::new(HashSet::new())),
             editors: editors::Editors::new(),
         };
-        gui.filter_seen.set((gui.filter.version(), gui.query.version()));
+        gui.view_seen.set(std::array::from_fn(|i| gui.views[i].input_versions()));
         gui
     }
 
@@ -290,14 +322,14 @@ impl Gui {
             self.rows.set(rows.clone());
             self.recompute_alerts(&rows);
             for (i, kind) in [Kind::Serial, Kind::Ssh, Kind::Tcp].into_iter().enumerate() {
-                let n = rows.iter().filter(|r| r.kind == kind).count();
-                self.nav_counts[i].set(n.to_string());
+                let of_kind = rows.iter().filter(|r| r.kind == kind);
+                let problems = of_kind.clone().filter(|r| model::is_problem(r)).count();
+                self.nav_counts[i].set(of_kind.count().to_string());
+                self.nav_problems[i].set(if problems > 0 { problems.to_string() } else { String::new() });
             }
-            for (i, kind) in [Kind::Serial, Kind::Ssh, Kind::Tcp].into_iter().enumerate() {
-                let of_kind: Vec<RuleRow> = rows.iter().filter(|r| r.kind == kind).cloned().collect();
-                self.by_kind[i].set(of_kind);
+            for i in 0..4 {
+                self.recompute_view(i);
             }
-            self.recompute_shown();
         }
 
         let (summary, attention) = model::summary(&rows);
@@ -334,25 +366,51 @@ impl Gui {
     /// 输入类状态（筛选、搜索框、选中项、行内开关）没有变化回调，由定时器轮询，
     /// 用信号的 `version()` 判断有没有变化。返回需要提示用户的错误（开关写回失败）。
     fn poll_inputs(&self) -> Vec<String> {
-        let key = (self.filter.version(), self.query.version());
-        if self.filter_seen.get() != key {
-            self.filter_seen.set(key);
-            self.recompute_shown();
+        let mut seen = self.view_seen.get();
+        for (i, view) in self.views.iter().enumerate() {
+            let key = view.input_versions();
+            if seen[i] != key {
+                seen[i] = key;
+                self.view_seen.set(seen);
+                self.recompute_view(i);
+            }
         }
         self.apply_switches()
     }
 
-    fn recompute_shown(&self) {
-        let kind = match self.filter.get() {
+    /// 重算某个列表页要显示的行（按该页自己的类型、搜索词、状态筛选和排序）与统计文字。
+    fn recompute_view(&self, index: usize) {
+        let view = self.views[index];
+        // 类型页固定一种类型；概览页由类型 segmented 决定
+        let kind = match index {
             1 => Some(Kind::Serial),
             2 => Some(Kind::Ssh),
             3 => Some(Kind::Tcp),
-            _ => None,
+            _ => match view.kind.get() {
+                1 => Some(Kind::Serial),
+                2 => Some(Kind::Ssh),
+                3 => Some(Kind::Tcp),
+                _ => None,
+            },
         };
-        let query = self.query.get();
-        let shown = self.rows.with(|rows| model::filter_rows(rows, kind, &query));
-        if self.shown.with(|s| *s != shown) {
-            self.shown.set(shown);
+        let spec = model::ViewSpec {
+            kind,
+            query: view.query.get(),
+            status: model::StatusFilter::from_index(view.status.get()),
+            problems_first: view.problems_first.get(),
+        };
+        let (shown, summary, total) = self.rows.with(|rows| {
+            let in_scope: Vec<RuleRow> = rows.iter().filter(|r| kind.is_none_or(|k| r.kind == k)).cloned().collect();
+            (model::select_rows(rows, &spec), model::list_summary(&in_scope), in_scope.len())
+        });
+        if view.shown.with(|s| *s != shown) {
+            view.shown.set(shown);
+        }
+        if view.summary.with(|s| *s != summary) {
+            view.summary.set(summary);
+        }
+        if view.total.get() != total {
+            view.total.set(total);
         }
     }
 
@@ -470,6 +528,39 @@ impl Gui {
             ForwardRule::Tcp(r) => r.enabled = enabled,
         }
         self.apply_config(config).map_err(|e| format!("{e:#}"))
+    }
+
+    /// 工具栏「批量」作用的规则名：概览页是当前筛选出来的，类型页是该类型的全部规则。
+    pub fn batch_targets(&self, view: usize) -> Vec<String> {
+        let kind = match view {
+            1 => Some(Kind::Serial),
+            2 => Some(Kind::Ssh),
+            3 => Some(Kind::Tcp),
+            _ => return self.views[0].shown.with(|rows| rows.iter().map(|r| r.name.clone()).collect()),
+        };
+        self.rows
+            .with(|rows| rows.iter().filter(|r| Some(r.kind) == kind).map(|r| r.name.clone()).collect())
+    }
+
+    /// 一次启用 / 停用多条规则：读一次配置、写一次文件、重载一次。返回实际改动的条数。
+    pub fn set_enabled_many(&self, names: &[String], enabled: bool) -> Result<usize, String> {
+        let mut config = self.editable_config()?;
+        let mut changed = 0;
+        for rule in config.rules.iter_mut().filter(|r| names.iter().any(|n| n == r.name())) {
+            let flag = match rule {
+                ForwardRule::Serial(r) => &mut r.enabled,
+                ForwardRule::Ssh(r) => &mut r.enabled,
+                ForwardRule::Tcp(r) => &mut r.enabled,
+            };
+            if *flag != enabled {
+                *flag = enabled;
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.apply_config(config).map_err(|e| format!("{e:#}"))?;
+        }
+        Ok(changed)
     }
 
     /// 重试 SSH / TCP 规则（停止再启动）。
@@ -761,13 +852,21 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, gui) = setup(dir.path());
         gui.refresh();
-        gui.filter.set(1); // 只看串口
+        let overview = gui.views[0];
+        overview.kind.set(1); // 只看串口
         gui.poll_inputs();
-        assert!(gui.shown.with(|s| s.is_empty()));
-        gui.filter.set(3);
-        gui.query.set("WEB".into());
+        assert!(overview.shown.with(|s| s.is_empty()));
+        overview.kind.set(3);
+        overview.query.set("WEB".into());
         gui.poll_inputs();
-        assert_eq!(gui.shown.with(|s| s.len()), 1);
+        assert_eq!(overview.shown.with(|s| s.len()), 1);
+        // 每个页面的搜索互不影响：TCP 页没有被概览页的搜索词过滤
+        assert_eq!(gui.views[3].shown.with(|s| s.len()), 1);
+        gui.views[3].query.set("nope".into());
+        gui.poll_inputs();
+        assert!(gui.views[3].shown.with(|s| s.is_empty()));
+        assert_eq!(overview.shown.with(|s| s.len()), 1, "概览页不受 TCP 页搜索词影响");
+        assert_eq!(gui.views[3].total.get(), 1, "总数不受筛选影响");
         runtime.block_on(gui.service.shutdown());
     }
 
@@ -899,6 +998,67 @@ pub(super) mod tests {
         gui.refresh();
         gui.refresh();
         assert!(gui.alerts.with(|a| a.is_empty()), "关掉后刷新不应再显示");
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn batch_enable_disable_writes_the_config_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        let mut config = gui.editable_config().unwrap();
+        config.rules.push(tcp("api", &free_addr(), "127.0.0.1:9"));
+        gui.apply_config(config).unwrap();
+        gui.refresh();
+
+        // 类型页的批量目标是该类型的全部规则
+        let names = gui.batch_targets(3);
+        assert_eq!(names, ["web", "api"]);
+        assert!(gui.batch_targets(1).is_empty(), "没有串口规则");
+
+        assert_eq!(gui.set_enabled_many(&names, false).unwrap(), 2);
+        let saved = Config::load(gui.service.config_path()).unwrap();
+        assert!(saved.rules.iter().all(|r| !r.enabled()), "两条都应写回配置");
+        assert!(gui.rows.with(|r| r.iter().all(|row| row.status == "已停用")));
+        // 开关信号跟着对齐，不会被当成用户拨动再写回
+        assert!(gui.poll_inputs().is_empty());
+        assert!(!gui.rule_switch("web").get());
+
+        // 已经是目标状态的不算改动，也不重写配置
+        assert_eq!(gui.set_enabled_many(&names, false).unwrap(), 0);
+        // 只启用一条
+        assert_eq!(gui.set_enabled_many(&["web".to_string()], true).unwrap(), 1);
+        let saved = Config::load(gui.service.config_path()).unwrap();
+        assert_eq!(saved.rules.iter().filter(|r| r.enabled()).count(), 1);
+
+        // 配置损坏时拒绝
+        gui.load_error.set("解析失败".into());
+        assert!(gui.set_enabled_many(&names, true).is_err());
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn overview_batch_targets_follow_the_current_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        let mut config = gui.editable_config().unwrap();
+        config.rules.push(tcp("api", &free_addr(), "127.0.0.1:9"));
+        gui.apply_config(config).unwrap();
+        gui.refresh();
+        assert_eq!(gui.batch_targets(0), ["web", "api"]);
+        gui.views[0].query.set("api".into());
+        gui.poll_inputs();
+        assert_eq!(gui.batch_targets(0), ["api"], "概览页的批量只作用于筛选出来的规则");
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn restart_rule_reports_errors_for_serial_and_unknown_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        gui.refresh();
+        assert!(gui.restart_rule("web").is_ok());
+        let err = gui.restart_rule("nope").unwrap_err();
+        assert!(err.contains("不存在"), "{err}");
         runtime.block_on(gui.service.shutdown());
     }
 }

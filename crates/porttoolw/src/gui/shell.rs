@@ -102,14 +102,15 @@ fn sidebar(gui: &Gui) -> Element {
         .spacing(4)
         .child(brand)
         .child(nav_item(gui, 0, "概览", None))
-        .child(nav_item(gui, 1, "串口共享", Some(gui.nav_counts[0])))
-        .child(nav_item(gui, 2, "SSH 转发", Some(gui.nav_counts[1])))
-        .child(nav_item(gui, 3, "TCP 转发", Some(gui.nav_counts[2])))
+        .child(nav_item(gui, 1, "串口共享", Some((gui.nav_counts[0], gui.nav_problems[0]))))
+        .child(nav_item(gui, 2, "SSH 转发", Some((gui.nav_counts[1], gui.nav_problems[1]))))
+        .child(nav_item(gui, 3, "TCP 转发", Some((gui.nav_counts[2], gui.nav_problems[2]))))
         .child(Element::flex_spacer())
         .child(nav_item(gui, 4, "设置", None))
 }
 
-fn nav_item(gui: &Gui, index: usize, label: &str, count: Option<Signal<String>>) -> Element {
+/// 侧栏一项；`counts` 是（数量徽章, 异常数徽章），异常数为空串时不显示。
+fn nav_item(gui: &Gui, index: usize, label: &str, counts: Option<(Signal<String>, Signal<String>)>) -> Element {
     let page = gui.page;
     let selected = move || page.get() == index;
     let text_role = page.map(move |p| if *p == index { Role::AccentText } else { Role::Text });
@@ -133,14 +134,26 @@ fn nav_item(gui: &Gui, index: usize, label: &str, count: Option<Signal<String>>)
                 .fg_role_signal(text_role),
         )
         .child(Element::flex_spacer());
-    if let Some(count) = count {
-        row = row.child(
-            Element::label_signal(count)
-                .fg_role(Role::TextMuted)
-                .padding_xy(8, 1)
-                .corner(999.0)
-                .bg_role(Role::SurfaceAlt),
-        );
+    if let Some((count, problems)) = counts {
+        row = row
+            .spacing(6)
+            .child(
+                Element::label_signal(problems)
+                    .fg_role(Role::Danger)
+                    .font_weight(600)
+                    .padding_xy(8, 1)
+                    .corner(999.0)
+                    .bg_role_alpha(Role::Danger, 0.14)
+                    .tooltip("有异常的规则数")
+                    .visible_when(move || problems.with(|t| !t.is_empty())),
+            )
+            .child(
+                Element::label_signal(count)
+                    .fg_role(Role::TextMuted)
+                    .padding_xy(8, 1)
+                    .corner(999.0)
+                    .bg_role(Role::SurfaceAlt),
+            );
     }
     row
 }
