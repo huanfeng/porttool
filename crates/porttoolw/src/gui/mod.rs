@@ -28,6 +28,40 @@ use model::{Kind, RuleRow, Stats};
 /// 单实例标识，`main` 里的提前仲裁与 `App::single_instance` 必须一致。
 pub const APP_ID: &str = "porttool";
 
+/// HTTP 地址的缓存：`bind` 为通配地址时要查本机局域网 IP（建一个 UDP 套接字），
+/// 不该每 0.5 秒查一次。监听地址 / 端口变了立即重算，其余情况每 30 秒刷新一次（网络切换时跟上）。
+#[derive(Default)]
+struct UrlCache {
+    key: Option<(String, u16)>,
+    at: Option<std::time::Instant>,
+    url: String,
+}
+
+impl UrlCache {
+    const TTL: Duration = Duration::from_secs(30);
+
+    fn get(
+        &mut self,
+        bind: &str,
+        port: u16,
+        now: std::time::Instant,
+        local_ip: impl FnOnce() -> Option<String>,
+    ) -> String {
+        let fresh = self.key.as_ref().is_some_and(|(b, p)| b == bind && *p == port)
+            && self.at.is_some_and(|at| now.duration_since(at) < Self::TTL);
+        if !fresh {
+            let host = match bind {
+                "0.0.0.0" | "::" => local_ip().unwrap_or_else(|| "127.0.0.1".into()),
+                other => other.to_string(),
+            };
+            self.url = format!("http://{host}:{port}/");
+            self.key = Some((bind.to_string(), port));
+            self.at = Some(now);
+        }
+        self.url.clone()
+    }
+}
+
 /// 一条规则的实时数据文案（连接数、流量），行内标签直接绑定这些信号。
 /// 刷新时只改这些信号，规则行（`RuleRow`）不变就不会被 `list_signal` 重建。
 #[derive(Clone, Copy)]
@@ -115,6 +149,7 @@ pub struct Gui {
     switches: Rc<RefCell<HashMap<String, SwitchEntry>>>,
     /// 规则名 → 实时数据信号；同样建在行作用域之外
     metrics: Rc<RefCell<HashMap<String, MetricSignals>>>,
+    url_cache: Rc<RefCell<UrlCache>>,
     editors: editors::Editors,
 }
 
@@ -245,6 +280,7 @@ impl Gui {
             theme: Rc::new(RefCell::new(None)),
             switches: Rc::new(RefCell::new(HashMap::new())),
             metrics: Rc::new(RefCell::new(HashMap::new())),
+            url_cache: Rc::new(RefCell::new(UrlCache::default())),
             editors: editors::Editors::new(),
             detail_seen: Rc::new(Cell::new(0)),
         };
@@ -255,7 +291,7 @@ impl Gui {
 
     /// 读取服务状态刷新所有视图信号；返回（托盘提示文字，是否有规则在线）。
     fn refresh(&self) -> (String, bool) {
-        let config = self.service.config();
+        let config = self.service.config_arc();
         let statuses = self.runtime.block_on(self.service.list_rules());
         let snapshots = self.service.snapshots();
         let rows = model::build_rows(&config, &statuses);
@@ -322,7 +358,7 @@ impl Gui {
     fn recompute_detail(&self) {
         self.detail_seen.set(self.selected_serial.version());
         let selected = self.selected_serial.get();
-        let config = self.service.config();
+        let config = self.service.config_arc();
         let detail: Vec<_> = model::serial_detail(&config, &selected).into_iter().collect();
         if self.serial_detail.with(|d| *d != detail) {
             self.serial_detail.set(detail);
@@ -466,12 +502,11 @@ impl Gui {
     }
 
     fn http_url_text(&self) -> String {
-        let server = self.service.config().server;
-        let host = match server.bind.as_str() {
-            "0.0.0.0" | "::" => local_ip().unwrap_or_else(|| "127.0.0.1".into()),
-            other => other.to_string(),
-        };
-        format!("http://{host}:{}/", server.http_port)
+        let config = self.service.config_arc();
+        let server = &config.server;
+        self.url_cache
+            .borrow_mut()
+            .get(&server.bind, server.http_port, std::time::Instant::now(), local_ip)
     }
 
     /// 本机地址：连接命令预览用。
@@ -518,7 +553,7 @@ impl Gui {
     }
 
     fn open_log_dir(&self) {
-        let dir = self.service.config().log_dir(self.service.config_path());
+        let dir = self.service.config_arc().log_dir(self.service.config_path());
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::process::Command::new("explorer").arg(&dir).spawn();
     }
@@ -798,6 +833,47 @@ pub(super) mod tests {
         assert_ne!(gui.rows.version(), rows_version, "状态变化应更新规则行");
         assert_eq!(gui.rows.with(|r| r[0].status.clone()), "已停用");
         assert_eq!(conns.get(), "—", "停用后没有连接数");
+        runtime.block_on(gui.service.shutdown());
+    }
+
+    #[test]
+    fn http_url_is_cached_until_address_changes_or_ttl_expires() {
+        use std::cell::Cell;
+        use std::time::Instant;
+        let calls = Cell::new(0);
+        let ip = || {
+            calls.set(calls.get() + 1);
+            Some("192.168.5.30".to_string())
+        };
+        let t0 = Instant::now();
+        let mut cache = UrlCache::default();
+
+        assert_eq!(cache.get("0.0.0.0", 7000, t0, ip), "http://192.168.5.30:7000/");
+        assert_eq!(cache.get("0.0.0.0", 7000, t0 + Duration::from_secs(10), ip), "http://192.168.5.30:7000/");
+        assert_eq!(calls.get(), 1, "TTL 内不应重复查本机 IP");
+
+        cache.get("0.0.0.0", 7000, t0 + Duration::from_secs(31), ip);
+        assert_eq!(calls.get(), 2, "超过 TTL 要重新查（网络可能变了）");
+
+        // 端口或监听地址变了：立即重算，不等 TTL
+        assert_eq!(cache.get("0.0.0.0", 7100, t0 + Duration::from_secs(32), ip), "http://192.168.5.30:7100/");
+        assert_eq!(calls.get(), 3);
+        assert_eq!(cache.get("127.0.0.1", 7100, t0 + Duration::from_secs(33), ip), "http://127.0.0.1:7100/");
+        assert_eq!(calls.get(), 3, "具体地址不需要查本机 IP");
+
+        // 查不到本机 IP 时退回 127.0.0.1
+        let mut cache = UrlCache::default();
+        assert_eq!(cache.get("::", 7000, t0, || None), "http://127.0.0.1:7000/");
+    }
+
+    #[test]
+    fn refresh_does_not_clone_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, gui) = setup(dir.path());
+        let before = gui.service.config_arc();
+        gui.refresh();
+        gui.refresh();
+        assert!(Arc::ptr_eq(&before, &gui.service.config_arc()), "刷新不应改动配置");
         runtime.block_on(gui.service.shutdown());
     }
 }

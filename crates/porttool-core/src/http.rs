@@ -143,7 +143,7 @@ async fn auth(
         .into_response();
     }
 
-    if let Some(token) = service.config().server.token {
+    if let Some(token) = service.config_arc().server.token.clone() {
         let bearer = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())

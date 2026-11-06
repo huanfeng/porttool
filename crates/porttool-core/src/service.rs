@@ -43,7 +43,7 @@ struct HttpServer {
 }
 
 pub struct Service {
-    config: Mutex<Config>,
+    config: Mutex<Arc<Config>>,
     config_path: PathBuf,
     serial: Mutex<BTreeMap<String, SerialEntry>>,
     /// SSH / TCP 转发器（异步启停，所以用 tokio 的锁）
@@ -63,7 +63,7 @@ impl Service {
     ) -> Result<Arc<Self>> {
         config.validate()?;
         let service = Arc::new(Self {
-            config: Mutex::new(config.clone()),
+            config: Mutex::new(Arc::new(config.clone())),
             config_path,
             serial: Mutex::new(BTreeMap::new()),
             net: RwLock::new(HashMap::new()),
@@ -75,7 +75,13 @@ impl Service {
         Ok(service)
     }
 
+    /// 当前配置的副本。只读时用 [`Service::config_arc`]，不用克隆整份配置。
     pub fn config(&self) -> Config {
+        self.config.lock().unwrap().as_ref().clone()
+    }
+
+    /// 当前配置的共享引用：廉价，`reload` 之后拿到的是新的一份（可用 `Arc::ptr_eq` 判断有没有变）。
+    pub fn config_arc(&self) -> Arc<Config> {
         self.config.lock().unwrap().clone()
     }
 
@@ -108,7 +114,7 @@ impl Service {
             let net = self.net.read().await;
             out.extend(net.values().map(|e| e.forwarder.status()));
         }
-        let config = self.config();
+        let config = self.config_arc();
         for rule in config.rules.iter().filter(|r| !r.enabled()) {
             out.push(ForwardStatus {
                 name: rule.name().to_string(),
@@ -153,7 +159,7 @@ impl Service {
     /// 应用新配置：配置没变的规则保持运行（终端连接不断），其余的停止或新建。
     pub async fn reload(self: &Arc<Self>, config: Config) -> Result<()> {
         config.validate()?;
-        let old = std::mem::replace(&mut *self.config.lock().unwrap(), config.clone());
+        let old = std::mem::replace(&mut *self.config.lock().unwrap(), Arc::new(config.clone()));
         self.apply(Some(&old.server), config).await;
         (self.on_event)(ServiceEvent::RulesReloaded);
         Ok(())
@@ -542,5 +548,27 @@ mod tests {
         let waiting = serial_status(&snap(PortState::Waiting));
         assert_eq!((waiting.state, waiting.endpoint), (State::Starting, None));
         assert_eq!(waiting.attempt, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn config_arc_is_shared_until_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let listen = free_addr().await;
+        let service = Service::start(config(vec![tcp("web", &listen, "127.0.0.1:9")]), path, |_| {})
+            .await
+            .unwrap();
+        let (a, b) = (service.config_arc(), service.config_arc());
+        assert!(Arc::ptr_eq(&a, &b), "没有 reload 时拿到的是同一份配置");
+        assert_eq!(*a, service.config());
+
+        let mut next = service.config();
+        next.server.token = Some("t".into());
+        service.reload(next).await.unwrap();
+        let c = service.config_arc();
+        assert!(!Arc::ptr_eq(&a, &c));
+        assert_eq!(c.server.token.as_deref(), Some("t"));
+        assert_eq!(a.server.token, None, "已经拿到手的旧引用不受影响");
+        service.shutdown().await;
     }
 }
