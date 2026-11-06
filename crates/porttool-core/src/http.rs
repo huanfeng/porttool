@@ -284,20 +284,24 @@ async fn list_rules(State(service): State<Arc<Service>>, Query(params): Query<Pa
     }
 }
 
+/// 启用规则并保存到配置（串口、SSH、TCP 都适用）
 async fn enable_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
-    service
-        .enable_rule(&name)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(text(format!("规则 {name} 已启动\n")))
+    set_rule_enabled(&service, &name, true).await
 }
 
+/// 停用规则并保存到配置
 async fn disable_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
+    set_rule_enabled(&service, &name, false).await
+}
+
+async fn set_rule_enabled(service: &Arc<Service>, name: &str, enabled: bool) -> ApiResult {
     service
-        .disable_rule(&name)
+        .set_enabled(name, enabled)
         .await
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(text(format!("规则 {name} 已停止\n")))
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let action = if enabled { "已启用" } else { "已停用" };
+    Ok(text(format!("规则 {name} {action}（已保存到配置）
+")))
 }
 
 async fn list_ports(State(service): State<Arc<Service>>, Query(params): Query<Params>) -> Response {
@@ -607,7 +611,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rules_endpoints_list_enable_disable() {
-        use crate::config::{Config, ForwardRule, ServerConfig, TcpRule};
+        use crate::config::{Config, Encoding, ForwardRule, SerialRule, ServerConfig, TcpRule, TerminalMode};
         let free = || {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
@@ -616,17 +620,34 @@ mod tests {
         let listen = format!("127.0.0.1:{}", free());
         let config = Config {
             server: ServerConfig { bind: "127.0.0.1".into(), http_port, ..ServerConfig::default() },
-            rules: vec![ForwardRule::Tcp(TcpRule {
-                name: "web".into(),
-                listen,
-                target: "127.0.0.1:9".into(),
-                max_connections: 10,
-                enabled: true,
-            })],
+            rules: vec![
+                ForwardRule::Tcp(TcpRule {
+                    name: "web".into(),
+                    listen,
+                    target: "127.0.0.1:9".into(),
+                    max_connections: 10,
+                    enabled: true,
+                }),
+                ForwardRule::Serial(SerialRule {
+                    name: "com1".into(),
+                    serial_number: None,
+                    // 不存在的串口：一直处于等待状态，不依赖硬件
+                    com: Some("COM250".into()),
+                    baud: 115_200,
+                    tcp_port: free(),
+                    mode: TerminalMode::Telnet,
+                    encoding: Encoding::Utf8,
+                    enabled: true,
+                }),
+            ],
         };
         let dir = tempfile::tempdir().unwrap();
-        let service = Service::start(config, dir.path().join("c.toml"), |_| {}).await.unwrap();
+        let path = dir.path().join("c.toml");
+        let service = Service::start(config, path.clone(), |_| {}).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
+        let enabled_in_file = |name: &str| {
+            Config::load(&path).unwrap().rules.iter().find(|r| r.name() == name).unwrap().enabled()
+        };
 
         let list = request(http_port, "GET", "/rules").await;
         assert!(list.contains("200 OK") && list.contains("web") && list.contains("running"), "{list}");
@@ -636,8 +657,21 @@ mod tests {
         let off = request(http_port, "POST", "/rules/web/disable").await;
         assert!(off.contains("200 OK"), "{off}");
         assert!(request(http_port, "GET", "/rules").await.contains("stopped"));
+        assert!(!enabled_in_file("web"), "停用应写入配置文件");
         let on = request(http_port, "POST", "/rules/web/enable").await;
         assert!(on.contains("200 OK"), "{on}");
+        assert!(enabled_in_file("web"));
+
+        // 串口规则同样可以启停并持久化
+        let off = request(http_port, "POST", "/rules/com1/disable").await;
+        assert!(off.contains("200 OK"), "{off}");
+        assert!(!enabled_in_file("com1"));
+        assert!(service.port("com1").is_none());
+        let on = request(http_port, "POST", "/rules/com1/enable").await;
+        assert!(on.contains("200 OK"), "{on}");
+        assert!(enabled_in_file("com1"));
+        assert!(service.port("com1").is_some());
+
         let missing = request(http_port, "POST", "/rules/nope/enable").await;
         assert!(missing.contains("400"), "{missing}");
         service.shutdown().await;

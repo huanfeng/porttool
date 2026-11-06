@@ -100,36 +100,52 @@ impl Service {
         self.ports().iter().map(|h| h.snapshot()).collect()
     }
 
-    /// 所有运行中规则的状态：串口在前，其后是 SSH / TCP（按名称排序）
+    /// 所有规则的状态：串口在前，其后是 SSH / TCP（各自按名称排序）；
+    /// 已停用的规则也在列表里，状态为 `Stopped`。
     pub async fn list_rules(&self) -> Vec<ForwardStatus> {
         let mut out: Vec<ForwardStatus> = self.snapshots().iter().map(serial_status).collect();
-        let net = self.net.read().await;
-        let mut others: Vec<ForwardStatus> = net.values().map(|e| e.forwarder.status()).collect();
-        others.sort_by(|a, b| a.name.cmp(&b.name));
-        out.extend(others);
+        {
+            let net = self.net.read().await;
+            out.extend(net.values().map(|e| e.forwarder.status()));
+        }
+        let config = self.config();
+        for rule in config.rules.iter().filter(|r| !r.enabled()) {
+            out.push(ForwardStatus {
+                name: rule.name().to_string(),
+                rule_type: rule.rule_type(),
+                state: State::Stopped,
+                detail: "已停用".into(),
+                clients: 0,
+            });
+        }
+        out.sort_by(|a, b| {
+            (a.rule_type != RuleType::Serial, &a.name).cmp(&(b.rule_type != RuleType::Serial, &b.name))
+        });
         out
     }
 
-    /// 启动已存在的 SSH / TCP 规则（失败后手动重试等）
-    pub async fn enable_rule(&self, name: &str) -> Result<()> {
-        let net = self.net.read().await;
-        let entry = net
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("规则不存在或不是 SSH/TCP 规则: {name}"))?;
-        entry.forwarder.start().await?;
-        (self.on_event)(ServiceEvent::RuleChanged(name.to_string()));
-        Ok(())
-    }
-
-    /// 停止 SSH / TCP 规则（保留在列表中，可再次启用）
-    pub async fn disable_rule(&self, name: &str) -> Result<()> {
-        let net = self.net.read().await;
-        let entry = net
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("规则不存在或不是 SSH/TCP 规则: {name}"))?;
-        entry.forwarder.stop().await?;
-        (self.on_event)(ServiceEvent::RuleChanged(name.to_string()));
-        Ok(())
+    /// 启用 / 停用一条规则并**保存到配置文件**（串口、SSH、TCP 都适用）。
+    ///
+    /// 以磁盘上的配置为基准（文件不存在时用内存里的配置），这样手工改过但还没
+    /// 重新加载的内容不会被冲掉；保存后立即应用，规则随之启动或停止。
+    pub async fn set_enabled(self: &Arc<Self>, name: &str, enabled: bool) -> Result<()> {
+        let mut config = if self.config_path.exists() {
+            Config::load(&self.config_path)?
+        } else {
+            self.config()
+        };
+        let rule = config
+            .rules
+            .iter_mut()
+            .find(|r| r.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("规则不存在: {name}"))?;
+        match rule {
+            ForwardRule::Serial(r) => r.enabled = enabled,
+            ForwardRule::Ssh(r) => r.enabled = enabled,
+            ForwardRule::Tcp(r) => r.enabled = enabled,
+        }
+        config.save(&self.config_path)?;
+        self.reload(config).await
     }
 
     /// 应用新配置：配置没变的规则保持运行（终端连接不断），其余的停止或新建。
@@ -461,14 +477,44 @@ mod tests {
         assert_eq!(web.state, State::Running);
         assert!(web.detail.contains(&listen2), "应监听新地址: {}", web.detail);
 
-        // 手动停用 / 启用
-        service.disable_rule("web").await.unwrap();
+        // 停用 / 启用 TCP 规则：持久化到配置文件，停用后仍在列表里（Stopped）
+        let path = service.config_path().to_path_buf();
+        service.set_enabled("web", false).await.unwrap();
         let web = service.list_rules().await.into_iter().find(|r| r.name == "web").unwrap();
         assert_eq!(web.state, State::Stopped);
-        service.enable_rule("web").await.unwrap();
-        assert!(service.enable_rule("nope").await.is_err());
+        assert_eq!(web.rule_type, RuleType::Tcp);
+        assert!(!Config::load(&path).unwrap().rules.iter().find(|r| r.name() == "web").unwrap().enabled());
+        service.set_enabled("web", true).await.unwrap();
+        let web = service.list_rules().await.into_iter().find(|r| r.name == "web").unwrap();
+        assert_eq!(web.state, State::Running);
+        assert!(Config::load(&path).unwrap().rules.iter().find(|r| r.name() == "web").unwrap().enabled());
+
+        // 串口规则同样适用：停用后串口停止，但仍列出
+        service.set_enabled("com1", false).await.unwrap();
+        assert!(service.port("com1").is_none(), "停用后串口应停止");
+        let rules = service.list_rules().await;
+        let com = rules.iter().find(|r| r.name == "com1").unwrap();
+        assert_eq!((com.rule_type, com.state), (RuleType::Serial, State::Stopped));
+        assert_eq!(rules[0].name, "com1", "串口排在最前");
+        service.set_enabled("com1", true).await.unwrap();
+        assert!(service.port("com1").is_some());
+
+        assert!(service.set_enabled("nope", true).await.is_err());
 
         service.shutdown().await;
         assert!(service.list_rules().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_enabled_rejects_broken_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let service = Service::start(config(vec![tcp("web", &free_addr().await, "127.0.0.1:9")]), path.clone(), |_| {})
+            .await
+            .unwrap();
+        std::fs::write(&path, "this is = not [valid toml").unwrap();
+        assert!(service.set_enabled("web", false).await.is_err(), "配置文件损坏时不应覆盖它");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is = not [valid toml");
+        service.shutdown().await;
     }
 }

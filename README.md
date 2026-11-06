@@ -77,7 +77,7 @@ porttoolw 是 GUI 程序，命令行功能都在 `porttool` 里：
 ```
 porttool list                        所有转发规则及状态
 porttool ports                       串口详情（波特率、端口、客户端、日志序号）
-porttool enable|disable <name>       启动 / 停止 SSH、TCP 规则
+porttool enable|disable <name>       启用 / 停用规则（写入配置，持久化）
 porttool devices --local             列出本机串口及 USB 序列号（不需要服务在运行）
 porttool serve [--config <path>]     不启动界面，在前台运行服务（日志输出到控制台）
 porttool tail|log|grep|wait|follow|send <name> ...   读取串口日志、向设备发送数据

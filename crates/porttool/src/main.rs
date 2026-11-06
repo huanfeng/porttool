@@ -20,7 +20,7 @@ const AFTER_HELP: &str = "\
 示例：
   porttool list                                      查看所有转发规则及状态
   porttool ports                                     查看串口详情
-  porttool disable dev-proxy                         停止一条 SSH / TCP 规则
+  porttool disable dev-proxy                         停用一条规则（写入配置）
   porttool devices --local                           列出本机串口及 USB 序列号（不需要服务）
   porttool tail esp32 -n 100                         最近 100 行日志
   porttool log esp32 --since 1520                    1520 之后的新日志（末行给出下次的 since）
@@ -57,9 +57,9 @@ enum Command {
     List,
     /// 列出串口的详细状态（波特率、端口、客户端、日志序号）
     Ports,
-    /// 启动 SSH / TCP 规则
+    /// 启用规则（串口 / SSH / TCP，写入配置文件）
     Enable { name: String },
-    /// 停止 SSH / TCP 规则
+    /// 停用规则（写入配置文件，重启后保持停用）
     Disable { name: String },
     /// 列出服务所在机器的串口设备（COM 号、USB 序列号，用于填写配置）
     Devices {

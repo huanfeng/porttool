@@ -62,6 +62,15 @@ impl ForwardRule {
         }
     }
 
+    pub fn rule_type(&self) -> crate::forwarding::RuleType {
+        use crate::forwarding::RuleType;
+        match self {
+            ForwardRule::Serial(_) => RuleType::Serial,
+            ForwardRule::Ssh(_) => RuleType::Ssh,
+            ForwardRule::Tcp(_) => RuleType::Tcp,
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         match self {
             ForwardRule::Serial(r) => r.enabled,

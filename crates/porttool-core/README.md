@@ -42,8 +42,8 @@ async fn main() -> anyhow::Result<()> {
         println!("{}: {:?}", rule.name, rule.state);
     }
     
-    // 启动 / 停止 SSH、TCP 规则
-    service.enable_rule("dev-proxy").await?;
+    // 启用 / 停用规则（写入配置文件并立即生效）
+    service.set_enabled("dev-proxy", false).await?;
     
     // 等待退出信号
     tokio::signal::ctrl_c().await?;
