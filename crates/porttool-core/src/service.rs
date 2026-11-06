@@ -156,6 +156,33 @@ impl Service {
         self.reload(config).await
     }
 
+    /// 重试一条 SSH / TCP 规则：停止转发器再启动它（失败后释放了端口、网络恢复了，
+    /// 不用先停用再启用）。规则不存在、已停用，或是串口规则时返回明确的错误。
+    pub async fn restart_rule(&self, name: &str) -> Result<()> {
+        let config = self.config_arc();
+        let rule = config
+            .rules
+            .iter()
+            .find(|r| r.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("规则不存在: {name}"))?;
+        if matches!(rule, ForwardRule::Serial(_)) {
+            anyhow::bail!("串口会自动重新扫描设备，无需重试: {name}");
+        }
+        if !rule.enabled() {
+            anyhow::bail!("规则 {name} 已停用，请先启用");
+        }
+        let result = {
+            let net = self.net.read().await;
+            let entry = net
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("规则 {name} 当前没有在运行的转发器"))?;
+            entry.forwarder.stop().await?;
+            entry.forwarder.start().await
+        };
+        (self.on_event)(ServiceEvent::RuleChanged(name.to_string()));
+        result
+    }
+
     /// 应用新配置：配置没变的规则保持运行（终端连接不断），其余的停止或新建。
     pub async fn reload(self: &Arc<Self>, config: Config) -> Result<()> {
         config.validate()?;
@@ -527,6 +554,46 @@ mod tests {
         std::fs::write(&path, "this is = not [valid toml").unwrap();
         assert!(service.set_enabled("web", false).await.is_err(), "配置文件损坏时不应覆盖它");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is = not [valid toml");
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_rule_recovers_after_the_port_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // 先占住监听端口：TCP 规则启动失败
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = blocker.local_addr().unwrap().to_string();
+        let service = Service::start(
+            config(vec![tcp("web", &listen, "127.0.0.1:9"), serial("com1", 47231, 115_200)]),
+            path,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let state = |s: &Arc<Service>| {
+            let s = s.clone();
+            async move { s.list_rules().await.into_iter().find(|r| r.name == "web").unwrap().state }
+        };
+        for _ in 0..50 {
+            if state(&service).await == State::Failed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(state(&service).await, State::Failed, "端口被占用时应失败");
+
+        // 释放端口后重试：能恢复
+        drop(blocker);
+        service.restart_rule("web").await.unwrap();
+        assert_eq!(state(&service).await, State::Running);
+
+        // 明确的错误：不存在 / 串口 / 已停用
+        let err = |r: Result<()>| format!("{:#}", r.unwrap_err());
+        assert!(err(service.restart_rule("nope").await).contains("不存在"));
+        assert!(err(service.restart_rule("com1").await).contains("无需重试"));
+        service.set_enabled("web", false).await.unwrap();
+        assert!(err(service.restart_rule("web").await).contains("已停用"));
         service.shutdown().await;
     }
 

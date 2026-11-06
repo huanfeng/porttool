@@ -61,6 +61,8 @@ enum Command {
     Enable { name: String },
     /// 停用规则（写入配置文件，重启后保持停用）
     Disable { name: String },
+    /// 重试 SSH / TCP 规则：停止再启动（失败后释放了端口、网络恢复了用）
+    Restart { name: String },
     /// 列出服务所在机器的串口设备（COM 号、USB 序列号，用于填写配置）
     Devices {
         /// 直接枚举本机串口，不经过服务（服务没有运行时也可用）
@@ -152,6 +154,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Ports => client.print(client.get("/ports", None)),
         Command::Enable { name } => client.finish(client.post(&format!("/rules/{name}/enable"), None).send_empty()),
         Command::Disable { name } => client.finish(client.post(&format!("/rules/{name}/disable"), None).send_empty()),
+        Command::Restart { name } => client.finish(client.post(&format!("/rules/{name}/restart"), None).send_empty()),
         Command::Devices { local: true } => {
             local::print_devices();
             Ok(ExitCode::SUCCESS)

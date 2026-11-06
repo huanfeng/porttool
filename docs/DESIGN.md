@@ -151,6 +151,7 @@ TCP 的监听和目标必须是 `IP:端口`。
 | GET | `/` | 使用说明（Markdown），给 AI 读 |
 | GET | `/rules` | 所有规则（串口、SSH、TCP，含已停用的）及状态；JSON 带 `endpoint`（串口当前 COM 号）与 `attempt`（SSH 第几次重连） |
 | POST | `/rules/{name}/enable` `/disable` | 启用 / 停用规则（串口、SSH、TCP 都适用，持久化到配置） |
+| POST | `/rules/{name}/restart` | 重试 SSH / TCP 规则：停止再启动 |
 | GET | `/ports` | 串口详情：别名、状态、TCP 端口、客户端数量、最新 seq |
 | GET | `/devices` | 本机串口设备 |
 | GET | `/ports/{name}/tail?lines=200` | 最近 N 行 |
@@ -175,6 +176,7 @@ porttool [--host <addr>] [--token <t>] [--json] <命令>
   list                                  所有规则及状态
   ports                                 串口详情
   enable|disable <name>                 启用 / 停用规则（写入配置，持久化）
+  restart <name>                        重试 SSH / TCP 规则（停止再启动）
   tail   <name> [-n 200]                最近 N 行
   log    <name> [--since <seq>]         增量读取（输出末尾会打印 next seq）
   grep   <name> <regex>                 搜索

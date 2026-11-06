@@ -20,6 +20,7 @@ PortTool 把本机串口共享到网络上。通过这个接口可以读取设�
 | GET | `/rules` | 所有转发规则（串口、SSH、TCP，含已停用的）及状态 |
 | POST | `/rules/{name}/enable` | 启用规则（串口、SSH、TCP 都适用，同时写入配置文件） |
 | POST | `/rules/{name}/disable` | 停用规则（同时写入配置文件，重启后保持停用） |
+| POST | `/rules/{name}/restart` | 重试 SSH / TCP 规则：停止再启动（失败后释放了端口、网络恢复了用；串口会自动重扫设备，无需重试） |
 | GET | `/ports` | 串口列表和状态 |
 | GET | `/devices` | 本机所有串口设备（用于配置） |
 | GET | `/ssh/servers` | `~/.ssh/config` 里的服务器别名（用于填写 ssh_target） |

@@ -37,6 +37,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/rules", get(list_rules))
         .route("/rules/{name}/enable", post(enable_rule))
         .route("/rules/{name}/disable", post(disable_rule))
+        .route("/rules/{name}/restart", post(restart_rule))
         .route("/ports", get(list_ports))
         .route("/devices", get(list_devices))
         .route("/ssh/servers", get(ssh_servers))
@@ -295,6 +296,15 @@ async fn enable_rule(State(service): State<Arc<Service>>, Path(name): Path<Strin
 /// 停用规则并保存到配置
 async fn disable_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
     set_rule_enabled(&service, &name, false).await
+}
+
+/// 重试 SSH / TCP 规则：停止再启动（失败后释放了端口、网络恢复了，不必先停用再启用）
+async fn restart_rule(State(service): State<Arc<Service>>, Path(name): Path<String>) -> ApiResult {
+    service
+        .restart_rule(&name)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(text(format!("规则 {name} 已重试\n")))
 }
 
 async fn set_rule_enabled(service: &Arc<Service>, name: &str, enabled: bool) -> ApiResult {
@@ -693,6 +703,10 @@ mod tests {
         assert!(enabled_in_file("com1"));
         assert!(service.port("com1").is_some());
 
+        let again = request(http_port, "POST", "/rules/web/restart").await;
+        assert!(again.contains("200 OK") && again.contains("已重试"), "{again}");
+        let serial_restart = request(http_port, "POST", "/rules/com1/restart").await;
+        assert!(serial_restart.contains("400") && serial_restart.contains("无需重试"), "{serial_restart}");
         let missing = request(http_port, "POST", "/rules/nope/enable").await;
         assert!(missing.contains("400"), "{missing}");
         service.shutdown().await;
